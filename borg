@@ -247,6 +247,19 @@ check_prerequisites() {
     fi
 }
 
+# Check if a script exists in package.json
+# Usage: has_script "lint" [package.json path]
+has_script() {
+    local script_name="$1"
+    local pkg_file="${2:-package.json}"
+
+    if [[ -f "$pkg_file" ]] && command -v jq &>/dev/null; then
+        [[ -n "$(jq -r ".scripts.\"$script_name\" // empty" "$pkg_file" 2>/dev/null)" ]]
+    else
+        return 1
+    fi
+}
+
 detect_project_type() {
     local project_path="${1:-.}"
 
@@ -1246,6 +1259,8 @@ get_abs_spec_dir() {
 generate_agents_md() {
     local project_type="$1"
     local output_file="$2"
+    local project_dir
+    project_dir=$(dirname "$output_file")
 
     cat > "$output_file" << 'HEADER'
 # AGENTS.md - Operational Guide
@@ -1259,70 +1274,95 @@ HEADER
 
     case "$project_type" in
         bun)
-            cat >> "$output_file" << 'BUN'
-## Build
-```bash
-bun install
-bun run build
-```
+            # Build section
+            echo "## Build" >> "$output_file"
+            echo '```bash' >> "$output_file"
+            echo "bun install" >> "$output_file"
+            has_script "build" "$project_dir/package.json" && echo "bun run build" >> "$output_file"
+            echo '```' >> "$output_file"
+            echo "" >> "$output_file"
 
-## Test
-```bash
-bun test
-bun test --coverage
-```
+            # Test section
+            echo "## Test" >> "$output_file"
+            echo '```bash' >> "$output_file"
+            has_script "test" "$project_dir/package.json" && echo "bun test" >> "$output_file"
+            has_script "test" "$project_dir/package.json" && echo "bun test --coverage" >> "$output_file"
+            # If no test script, suggest default
+            has_script "test" "$project_dir/package.json" || echo "# Add test script to package.json" >> "$output_file"
+            echo '```' >> "$output_file"
+            echo "" >> "$output_file"
 
-## Lint & Type Check
-```bash
-bun run lint
-bun run lint --fix
-bun run typecheck
-```
+            # Lint & Type Check section
+            echo "## Lint & Type Check" >> "$output_file"
+            echo '```bash' >> "$output_file"
+            has_script "lint" "$project_dir/package.json" && echo "bun run lint" >> "$output_file"
+            has_script "lint" "$project_dir/package.json" && echo "bun run lint --fix" >> "$output_file"
+            has_script "typecheck" "$project_dir/package.json" && echo "bun run typecheck" >> "$output_file"
+            # Fallback to tsc if no typecheck script but tsconfig exists
+            if ! has_script "typecheck" "$project_dir/package.json" && [[ -f "$project_dir/tsconfig.json" ]]; then
+                echo "bunx tsc --noEmit" >> "$output_file"
+            fi
+            echo '```' >> "$output_file"
+            echo "" >> "$output_file"
 
-## Development
-```bash
-bun run dev
-```
+            # Development section
+            echo "## Development" >> "$output_file"
+            echo '```bash' >> "$output_file"
+            has_script "dev" "$project_dir/package.json" && echo "bun run dev" >> "$output_file"
+            has_script "dev" "$project_dir/package.json" || echo "# Add dev script to package.json" >> "$output_file"
+            echo '```' >> "$output_file"
+            echo "" >> "$output_file"
 
-## Learnings
-<!-- Add project-specific learnings here as you discover them -->
-
-BUN
+            echo "## Learnings" >> "$output_file"
+            echo "<!-- Add project-specific learnings here as you discover them -->" >> "$output_file"
+            echo "" >> "$output_file"
             ;;
         npm|yarn|pnpm)
             local pm="$project_type"
             local run_cmd="$pm run"
             [[ "$pm" == "npm" ]] && run_cmd="npm run"
 
-            cat >> "$output_file" << EOF
-## Build
-\`\`\`bash
-$pm install
-$run_cmd build
-\`\`\`
+            # Build section
+            echo "## Build" >> "$output_file"
+            echo '```bash' >> "$output_file"
+            echo "$pm install" >> "$output_file"
+            has_script "build" "$project_dir/package.json" && echo "$run_cmd build" >> "$output_file"
+            echo '```' >> "$output_file"
+            echo "" >> "$output_file"
 
-## Test
-\`\`\`bash
-$run_cmd test
-$run_cmd test -- --coverage
-\`\`\`
+            # Test section
+            echo "## Test" >> "$output_file"
+            echo '```bash' >> "$output_file"
+            has_script "test" "$project_dir/package.json" && echo "$run_cmd test" >> "$output_file"
+            has_script "test" "$project_dir/package.json" && echo "$run_cmd test -- --coverage" >> "$output_file"
+            has_script "test" "$project_dir/package.json" || echo "# Add test script to package.json" >> "$output_file"
+            echo '```' >> "$output_file"
+            echo "" >> "$output_file"
 
-## Lint & Type Check
-\`\`\`bash
-$run_cmd lint
-$run_cmd lint --fix
-$run_cmd typecheck
-\`\`\`
+            # Lint & Type Check section
+            echo "## Lint & Type Check" >> "$output_file"
+            echo '```bash' >> "$output_file"
+            has_script "lint" "$project_dir/package.json" && echo "$run_cmd lint" >> "$output_file"
+            has_script "lint" "$project_dir/package.json" && echo "$run_cmd lint --fix" >> "$output_file"
+            has_script "typecheck" "$project_dir/package.json" && echo "$run_cmd typecheck" >> "$output_file"
+            # Fallback to tsc if no typecheck script but tsconfig exists
+            if ! has_script "typecheck" "$project_dir/package.json" && [[ -f "$project_dir/tsconfig.json" ]]; then
+                echo "npx tsc --noEmit" >> "$output_file"
+            fi
+            echo '```' >> "$output_file"
+            echo "" >> "$output_file"
 
-## Development
-\`\`\`bash
-$run_cmd dev
-\`\`\`
+            # Development section
+            echo "## Development" >> "$output_file"
+            echo '```bash' >> "$output_file"
+            has_script "dev" "$project_dir/package.json" && echo "$run_cmd dev" >> "$output_file"
+            has_script "dev" "$project_dir/package.json" || echo "# Add dev script to package.json" >> "$output_file"
+            echo '```' >> "$output_file"
+            echo "" >> "$output_file"
 
-## Learnings
-<!-- Add project-specific learnings here as you discover them -->
-
-EOF
+            echo "## Learnings" >> "$output_file"
+            echo "<!-- Add project-specific learnings here as you discover them -->" >> "$output_file"
+            echo "" >> "$output_file"
             ;;
         rails)
             cat >> "$output_file" << 'RAILS'
@@ -1560,35 +1600,95 @@ cmd_spec() {
     local project_type
     project_type=$(detect_project_type ".")
 
-    # Generate quality gates based on project type
+    # Generate quality gates based on project type and available scripts
     local quality_gates=""
     case "$project_type" in
         bun)
-            quality_gates="- [ ] Tests pass: \`bun test\`
-- [ ] Lint clean: \`bun run lint\`
-- [ ] Types check: \`bun run typecheck\`
-- [ ] Build succeeds: \`bun run build\`"
+            quality_gates=""
+            has_script "test" && quality_gates+="- [ ] Tests pass: \`bun test\`"$'\n'
+            has_script "lint" && quality_gates+="- [ ] Lint clean: \`bun run lint\`"$'\n'
+            if has_script "typecheck"; then
+                quality_gates+="- [ ] Types check: \`bun run typecheck\`"$'\n'
+            elif [[ -f "tsconfig.json" ]]; then
+                quality_gates+="- [ ] Types check: \`bunx tsc --noEmit\`"$'\n'
+            fi
+            has_script "build" && quality_gates+="- [ ] Build succeeds: \`bun run build\`"
+            # Trim trailing newline
+            quality_gates="${quality_gates%$'\n'}"
             ;;
         npm|yarn|pnpm)
-            quality_gates="- [ ] Tests pass: \`$project_type run test\`
-- [ ] Lint clean: \`$project_type run lint\`
-- [ ] Types check: \`$project_type run typecheck\`
-- [ ] Build succeeds: \`$project_type run build\`"
+            quality_gates=""
+            has_script "test" && quality_gates+="- [ ] Tests pass: \`$project_type run test\`"$'\n'
+            has_script "lint" && quality_gates+="- [ ] Lint clean: \`$project_type run lint\`"$'\n'
+            if has_script "typecheck"; then
+                quality_gates+="- [ ] Types check: \`$project_type run typecheck\`"$'\n'
+            elif [[ -f "tsconfig.json" ]]; then
+                quality_gates+="- [ ] Types check: \`npx tsc --noEmit\`"$'\n'
+            fi
+            has_script "build" && quality_gates+="- [ ] Build succeeds: \`$project_type run build\`"
+            quality_gates="${quality_gates%$'\n'}"
             ;;
         rails)
             quality_gates="- [ ] Tests pass: \`bin/rails test\`
-- [ ] Lint clean: \`bundle exec rubocop\`
-- [ ] Security check: \`bundle exec brakeman -q\`"
+- [ ] Lint clean: \`bundle exec rubocop\`"
+            [[ -f "Gemfile" ]] && grep -q "brakeman" Gemfile && \
+                quality_gates+=$'\n'"- [ ] Security check: \`bundle exec brakeman -q\`"
             ;;
         python)
-            quality_gates="- [ ] Tests pass: \`pytest\`
-- [ ] Lint clean: \`ruff check .\`
-- [ ] Types check: \`mypy .\`"
+            quality_gates=""
+            [[ -f "pytest.ini" || -f "pyproject.toml" ]] && quality_gates+="- [ ] Tests pass: \`pytest\`"$'\n'
+            [[ -f "pyproject.toml" ]] && grep -q "ruff" pyproject.toml 2>/dev/null && \
+                quality_gates+="- [ ] Lint clean: \`ruff check .\`"$'\n'
+            [[ -f "pyproject.toml" ]] && grep -q "mypy" pyproject.toml 2>/dev/null && \
+                quality_gates+="- [ ] Types check: \`mypy .\`"
+            quality_gates="${quality_gates%$'\n'}"
             ;;
         *)
             quality_gates="- [ ] Tests pass: \`<add test command>\`
 - [ ] Lint clean: \`<add lint command>\`"
             ;;
+    esac
+
+    # If no quality gates were detected, add placeholder
+    [[ -z "$quality_gates" ]] && quality_gates="- [ ] Add quality gates for your project"
+
+    # Build dynamic validation command based on available scripts
+    local validate_cmd=""
+    case "$project_type" in
+        bun)
+            has_script "lint" && validate_cmd+="bun run lint"
+            if has_script "typecheck"; then
+                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
+                validate_cmd+="bun run typecheck"
+            elif [[ -f "tsconfig.json" ]]; then
+                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
+                validate_cmd+="bunx tsc --noEmit"
+            fi
+            ;;
+        npm|yarn|pnpm)
+            has_script "lint" && validate_cmd+="$project_type run lint"
+            if has_script "typecheck"; then
+                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
+                validate_cmd+="$project_type run typecheck"
+            elif [[ -f "tsconfig.json" ]]; then
+                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
+                validate_cmd+="npx tsc --noEmit"
+            fi
+            ;;
+        *)
+            validate_cmd="<add validation command>"
+            ;;
+    esac
+    [[ -z "$validate_cmd" ]] && validate_cmd="# No validation scripts found"
+
+    # Build install command
+    local install_cmd=""
+    case "$project_type" in
+        bun) install_cmd="bun install" ;;
+        npm) install_cmd="npm install" ;;
+        yarn) install_cmd="yarn install" ;;
+        pnpm) install_cmd="pnpm install" ;;
+        *) install_cmd="# Install dependencies" ;;
     esac
 
     log_info "Reading plan and converting to SPEC format..."
@@ -1639,7 +1739,7 @@ TASK ORDERING RULES (ENFORCED):
 
 #### Phase 1: Setup (MUST COMPLETE BEFORE IMPLEMENTATION)
 - [ ] Task 1: Install dependencies and verify all quality gates run
-  - Run: \`$([[ \"$project_type\" == \"bun\" ]] && echo \"bun install\" || echo \"npm install\")\`
+  - Run: \`$install_cmd\`
   - Verify: All quality gate commands execute (even if they fail)
   - **Blocker if skipped**: Cannot run backpressure without dependencies
 
@@ -1649,14 +1749,14 @@ TASK ORDERING RULES (ENFORCED):
 - [ ] Task N: [Create/modify source file]
   - File: \`src/path/to/file.ts\`
   - Test: \`tests/unit/file.test.ts\` (CREATE IN SAME ITERATION)
-  - Validate: \`$([[ \"$project_type\" == \"bun\" ]] && echo \"bun lint && bun typecheck\" || echo \"npm run lint && npm run typecheck\")\`
+  - Validate: \`$validate_cmd\`
   - Visual: (if UI component) \`agent-browser screenshot localhost:PORT/path\`
 
 [Example for a UI component:]
 - [ ] Task N: Create Header component
   - File: \`src/components/Header.tsx\`
   - Test: \`tests/unit/Header.test.tsx\` (CREATE IN SAME ITERATION)
-  - Validate: \`bun lint && bun typecheck\`
+  - Validate: \`$validate_cmd\`
   - Visual: \`agent-browser screenshot localhost:3000\` (REQUIRED FOR UI)
 
 #### Phase 3: Integration (After all implementation tasks)
@@ -2644,32 +2744,48 @@ cmd_fix() {
     local today_date
     today_date=$(date '+%Y-%m-%d')
 
+    # Generate quality gates based on available scripts
     local quality_gates=""
     case "$project_type" in
         bun)
-            quality_gates="- [ ] Tests pass: \`bun test\`
-- [ ] Lint clean: \`bun run lint\`
-- [ ] Types check: \`bun run typecheck\`"
+            has_script "test" && quality_gates+="- [ ] Tests pass: \`bun test\`"$'\n'
+            has_script "lint" && quality_gates+="- [ ] Lint clean: \`bun run lint\`"$'\n'
+            if has_script "typecheck"; then
+                quality_gates+="- [ ] Types check: \`bun run typecheck\`"
+            elif [[ -f "tsconfig.json" ]]; then
+                quality_gates+="- [ ] Types check: \`bunx tsc --noEmit\`"
+            fi
+            quality_gates="${quality_gates%$'\n'}"
             ;;
         npm|yarn|pnpm)
-            quality_gates="- [ ] Tests pass: \`$project_type run test\`
-- [ ] Lint clean: \`$project_type run lint\`
-- [ ] Types check: \`$project_type run typecheck\`"
+            has_script "test" && quality_gates+="- [ ] Tests pass: \`$project_type run test\`"$'\n'
+            has_script "lint" && quality_gates+="- [ ] Lint clean: \`$project_type run lint\`"$'\n'
+            if has_script "typecheck"; then
+                quality_gates+="- [ ] Types check: \`$project_type run typecheck\`"
+            elif [[ -f "tsconfig.json" ]]; then
+                quality_gates+="- [ ] Types check: \`npx tsc --noEmit\`"
+            fi
+            quality_gates="${quality_gates%$'\n'}"
             ;;
         rails)
             quality_gates="- [ ] Tests pass: \`bin/rails test\`
 - [ ] Lint clean: \`bundle exec rubocop\`"
             ;;
         python)
-            quality_gates="- [ ] Tests pass: \`pytest\`
-- [ ] Lint clean: \`ruff check .\`
-- [ ] Types check: \`mypy .\`"
+            quality_gates=""
+            [[ -f "pytest.ini" || -f "pyproject.toml" ]] && quality_gates+="- [ ] Tests pass: \`pytest\`"$'\n'
+            [[ -f "pyproject.toml" ]] && grep -q "ruff" pyproject.toml 2>/dev/null && \
+                quality_gates+="- [ ] Lint clean: \`ruff check .\`"$'\n'
+            [[ -f "pyproject.toml" ]] && grep -q "mypy" pyproject.toml 2>/dev/null && \
+                quality_gates+="- [ ] Types check: \`mypy .\`"
+            quality_gates="${quality_gates%$'\n'}"
             ;;
         *)
             quality_gates="- [ ] Tests pass
 - [ ] Lint clean"
             ;;
     esac
+    [[ -z "$quality_gates" ]] && quality_gates="- [ ] Add quality gates"
 
     local fix_type_label="${fix_type:-all}"
 
