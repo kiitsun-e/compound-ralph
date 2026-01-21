@@ -382,6 +382,32 @@ discover_project() {
         fi
     done
 
+    # Detect dev server port from config files
+    local dev_port=""
+    local dev_url=""
+
+    # Check Astro config
+    if ls astro.config.* 2>/dev/null | grep -q .; then
+        local config_file_check
+        config_file_check=$(ls astro.config.* 2>/dev/null | head -1)
+        dev_port=$(grep -oE 'port["\s]*:["\s]*[0-9]+' "$config_file_check" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+        [[ -z "$dev_port" ]] && dev_port=4321
+    # Check Vite config
+    elif ls vite.config.* 2>/dev/null | grep -q .; then
+        local config_file_check
+        config_file_check=$(ls vite.config.* 2>/dev/null | head -1)
+        dev_port=$(grep -oE 'port["\s]*:["\s]*[0-9]+' "$config_file_check" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+        [[ -z "$dev_port" ]] && dev_port=5173
+    # Check Next.js config
+    elif ls next.config.* 2>/dev/null | grep -q .; then
+        dev_port=3000
+    # Check Rails
+    elif [[ -f "bin/rails" ]]; then
+        dev_port=3000
+    fi
+
+    [[ -n "$dev_port" ]] && dev_url="http://localhost:$dev_port"
+
     # Get file modification times for change detection
     local pkg_mtime=""
     local lock_mtime=""
@@ -400,6 +426,7 @@ discover_project() {
 {
   "discovered": "$(date -Iseconds)",
   "package_manager": "$pkg_manager",
+  "dev_url": "$dev_url",
   "commands": {
     "test": "$test_cmd",
     "test_e2e": "$test_e2e_cmd",
@@ -3013,17 +3040,50 @@ cmd_spec_from_todos() {
 #=============================================================================
 
 detect_dev_server() {
-    # Prioritize port based on detected project type
+    # 1. Check .borg/project.json for configured dev_url first
+    if [[ -f ".borg/project.json" ]] && command -v jq &>/dev/null; then
+        local stored_url
+        stored_url=$(jq -r '.dev_url // empty' .borg/project.json 2>/dev/null)
+        if [[ -n "$stored_url" ]] && curl -s --connect-timeout 1 "$stored_url" > /dev/null 2>&1; then
+            echo "$stored_url"
+            return 0
+        fi
+    fi
+
+    # 2. Prioritize port based on detected project type
     local priority_port=""
     local ports=()
 
-    # Detect framework and set priority port
+    # Detect framework and try to extract custom port from config
     if ls astro.config.* 2>/dev/null | grep -q .; then
-        priority_port=4321  # Astro default
+        # Try to extract port from astro.config.mjs/ts
+        local astro_config
+        astro_config=$(ls astro.config.* 2>/dev/null | head -1)
+        if [[ -n "$astro_config" ]]; then
+            # Look for server.port or port: in config
+            local custom_port
+            custom_port=$(grep -oE 'port["\s]*:["\s]*[0-9]+' "$astro_config" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+            if [[ -n "$custom_port" ]]; then
+                priority_port="$custom_port"
+            else
+                priority_port=4321  # Astro default
+            fi
+        fi
     elif ls next.config.* 2>/dev/null | grep -q .; then
         priority_port=3000  # Next.js default
     elif ls vite.config.* 2>/dev/null | grep -q .; then
-        priority_port=5173  # Vite default
+        # Try to extract port from vite.config
+        local vite_config
+        vite_config=$(ls vite.config.* 2>/dev/null | head -1)
+        if [[ -n "$vite_config" ]]; then
+            local custom_port
+            custom_port=$(grep -oE 'port["\s]*:["\s]*[0-9]+' "$vite_config" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+            if [[ -n "$custom_port" ]]; then
+                priority_port="$custom_port"
+            else
+                priority_port=5173  # Vite default
+            fi
+        fi
     elif ls nuxt.config.* 2>/dev/null | grep -q .; then
         priority_port=3000  # Nuxt default
     elif [[ -f "svelte.config.js" ]]; then
@@ -3034,12 +3094,13 @@ detect_dev_server() {
         priority_port=3000  # Rails default
     fi
 
-    # Build port list with priority port first
+    # 3. Build port list with priority port first
     if [[ -n "$priority_port" ]]; then
         ports=("$priority_port")
     fi
-    # Add remaining common ports
-    for p in 4321 5173 5174 3000 8080 8000 4000 4200; do
+
+    # Add common ports and their variants (some tools auto-increment if port is busy)
+    for p in 4321 4322 4323 4324 4325 4326 5173 5174 5175 5176 3000 3001 3002 8080 8081 8000 8001 4000 4001 4200 4201; do
         if [[ "$p" != "$priority_port" ]]; then
             ports+=("$p")
         fi
