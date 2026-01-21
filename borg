@@ -1,0 +1,2934 @@
+#!/usr/bin/env bash
+#
+# borg - Ralph Borg: Autonomous Feature Implementation System
+#
+# Combines compound-engineering's planning workflows with the Ralph Loop
+# technique for autonomous, iterative feature implementation.
+#
+# Usage:
+#   borg init [project-path]           Initialize a project for Ralph Borg
+#   borg plan <feature-description>    Create and deepen a plan
+#   borg spec <plan-file>              Convert plan to SPEC.md format
+#   borg implement [spec-dir]          Start autonomous implementation loop
+#   borg status                        Show progress of all specs
+#   borg help                          Show this help
+#
+# Requirements:
+#   - Claude Code CLI (claude)
+#   - ralph-wiggum plugin: /plugin install ralph-wiggum@claude-plugins-official
+#   - compound-engineering plugin
+#
+# Philosophy:
+#   Planning is human-guided and rich. Implementation is autonomous and focused.
+#   Each iteration: fresh context + file-based state = no degradation.
+#   Backpressure (tests, lint, types) lets agents self-correct.
+#
+# Author: Built with Claude Code
+# Source: https://ghuntley.com/ralph/
+#
+
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# Configuration
+BORG_VERSION="2.0.0"
+BORG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SPECS_DIR="specs"
+PLANS_DIR="plans"
+MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
+ITERATION_DELAY="${ITERATION_DELAY:-3}"
+MAX_RETRIES="${MAX_RETRIES:-3}"
+RETRY_DELAY="${RETRY_DELAY:-5}"
+ITERATION_TIMEOUT="${ITERATION_TIMEOUT:-600}"  # 10 minutes per iteration
+MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-3}"
+
+# Track consecutive failures
+CONSECUTIVE_FAILURES=0
+
+# Graceful shutdown handling
+SHUTDOWN_REQUESTED=false
+CHILD_PIDS=()
+
+cleanup_and_exit() {
+    echo ""
+    log_warn "Shutdown requested. Cleaning up..."
+    SHUTDOWN_REQUESTED=true
+
+    # Kill any tracked child processes
+    for pid in "${CHILD_PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null
+        fi
+    done
+
+    # Kill entire process group to catch any stragglers
+    kill -TERM 0 2>/dev/null || true
+
+    log_info "Exiting. Resume with: borg implement"
+    exit 130
+}
+trap cleanup_and_exit SIGINT SIGTERM
+
+#=============================================================================
+# UTILITY FUNCTIONS
+#=============================================================================
+
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+log_step() {
+    echo -e "\n${CYAN}${BOLD}=== $1 ===${NC}\n"
+}
+
+# Run Claude with retry logic and timeout
+# Returns 0 on success, 1 on permanent failure
+run_claude_with_retry() {
+    local prompt="$1"
+    local log_file="$2"
+    local attempt=1
+    local delay="$RETRY_DELAY"
+    local temp_output
+    temp_output=$(mktemp)
+
+    # Cleanup temp file on exit
+    trap "rm -f '$temp_output'" RETURN
+
+    while [[ $attempt -le $MAX_RETRIES ]]; do
+        # Check for shutdown request
+        if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
+            return 1
+        fi
+
+        local exit_code=0
+
+        # Show attempt info
+        if [[ $attempt -gt 1 ]]; then
+            echo -e "${YELLOW}[RETRY $attempt/$MAX_RETRIES]${NC} Attempting again..."
+        fi
+
+        # Run Claude with timeout using pure bash (works everywhere)
+        # Disable set -e temporarily to capture exit code
+        set +e
+
+        # Start Claude in background
+        echo "$prompt" | claude --dangerously-skip-permissions --print > "$temp_output" 2>&1 &
+        local claude_pid=$!
+        CHILD_PIDS+=("$claude_pid")
+
+        # Start watchdog timer in background
+        (
+            sleep "$ITERATION_TIMEOUT"
+            if kill -0 $claude_pid 2>/dev/null; then
+                kill -TERM $claude_pid 2>/dev/null
+                sleep 2
+                kill -9 $claude_pid 2>/dev/null
+            fi
+        ) &
+        local watchdog_pid=$!
+        CHILD_PIDS+=("$watchdog_pid")
+
+        # Wait for Claude to finish
+        wait $claude_pid 2>/dev/null
+        exit_code=$?
+
+        # Kill watchdog if Claude finished first
+        kill $watchdog_pid 2>/dev/null
+        wait $watchdog_pid 2>/dev/null
+
+        # Clear tracked PIDs (they're done)
+        CHILD_PIDS=()
+
+        # Check if it was killed by timeout (exit code 143 = SIGTERM, 137 = SIGKILL)
+        if [[ $exit_code -eq 143 ]] || [[ $exit_code -eq 137 ]]; then
+            log_error "Iteration timed out after ${ITERATION_TIMEOUT}s"
+            exit_code=124  # Use same code as GNU timeout
+        fi
+
+        set -e
+
+        # Read output from temp file
+        local output=""
+        if [[ -f "$temp_output" ]]; then
+            output=$(cat "$temp_output")
+        fi
+
+        # Write output to log and terminal
+        if [[ -n "$output" ]]; then
+            echo "$output" | tee -a "$log_file"
+        fi
+
+        # Check for transient failures that warrant retry
+        local is_transient=false
+        local output_length=${#output}
+
+        # Timeout is transient
+        if [[ $exit_code -eq 124 ]]; then
+            is_transient=true
+        # Non-zero exit code is transient
+        elif [[ $exit_code -ne 0 ]]; then
+            is_transient=true
+            log_warn "Claude exited with code $exit_code"
+        elif [[ $output_length -lt 100 ]]; then
+            # Short output - check if it's an error message
+            if echo "$output" | grep -qiE "No messages returned|ECONNRESET|ETIMEDOUT|rate.limit exceeded|503 Service|502 Bad Gateway|overloaded|ENOTFOUND|socket hang up"; then
+                is_transient=true
+                log_warn "Transient API error detected in output"
+            elif [[ -z "$output" ]]; then
+                is_transient=true
+                log_warn "Empty output received"
+            fi
+        fi
+
+        if [[ "$is_transient" == "true" ]]; then
+            if [[ $attempt -lt $MAX_RETRIES ]]; then
+                echo ""
+                echo -e "${YELLOW}━━━ Retry ${attempt}/${MAX_RETRIES} ━━━${NC}"
+                echo -e "${YELLOW}Waiting ${delay}s before retry...${NC}"
+                echo -e "${YELLOW}(Ctrl+C to cancel)${NC}"
+                echo ""
+                sleep "$delay"
+                attempt=$((attempt + 1))
+                delay=$((delay * 2))  # Exponential backoff
+                # Clear temp file for next attempt
+                > "$temp_output"
+                continue
+            else
+                log_error "Max retries ($MAX_RETRIES) exceeded. Moving to next iteration."
+                return 1
+            fi
+        fi
+
+        # Success - reset consecutive failures
+        CONSECUTIVE_FAILURES=0
+        return 0
+    done
+
+    return 1
+}
+
+check_prerequisites() {
+    local missing=()
+
+    if ! command -v claude &> /dev/null; then
+        missing+=("claude (Claude Code CLI)")
+    fi
+
+    if ! command -v git &> /dev/null; then
+        missing+=("git")
+    fi
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_error "Missing prerequisites:"
+        for item in "${missing[@]}"; do
+            echo "  - $item"
+        done
+        exit 1
+    fi
+}
+
+detect_project_type() {
+    local project_path="${1:-.}"
+
+    if [[ -f "$project_path/package.json" ]]; then
+        if grep -q '"bun"' "$project_path/package.json" 2>/dev/null || [[ -f "$project_path/bun.lockb" ]]; then
+            echo "bun"
+        elif [[ -f "$project_path/yarn.lock" ]]; then
+            echo "yarn"
+        elif [[ -f "$project_path/pnpm-lock.yaml" ]]; then
+            echo "pnpm"
+        else
+            echo "npm"
+        fi
+    elif [[ -f "$project_path/Gemfile" ]]; then
+        echo "rails"
+    elif [[ -f "$project_path/pyproject.toml" ]] || [[ -f "$project_path/requirements.txt" ]]; then
+        echo "python"
+    elif [[ -f "$project_path/go.mod" ]]; then
+        echo "go"
+    elif [[ -f "$project_path/Cargo.toml" ]]; then
+        echo "rust"
+    else
+        echo "unknown"
+    fi
+}
+
+# Discover project configuration by reading actual files
+# Creates/updates .borg/project.json with discovered settings
+discover_project() {
+    mkdir -p .borg
+
+    local config_file=".borg/project.json"
+    local pkg_manager=""
+    local test_cmd=""
+    local test_e2e_cmd=""
+    local build_cmd=""
+    local db_cmd=""
+    local dev_cmd=""
+    local e2e_dir=""
+
+    # Detect package manager
+    if [[ -f "bun.lockb" ]]; then
+        pkg_manager="bun"
+    elif [[ -f "yarn.lock" ]]; then
+        pkg_manager="yarn"
+    elif [[ -f "pnpm-lock.yaml" ]]; then
+        pkg_manager="pnpm"
+    elif [[ -f "package-lock.json" ]] || [[ -f "package.json" ]]; then
+        pkg_manager="npm"
+    elif [[ -f "Gemfile" ]]; then
+        pkg_manager="bundle"
+    elif [[ -f "pyproject.toml" ]] || [[ -f "requirements.txt" ]]; then
+        pkg_manager="pip"
+    fi
+
+    # Read package.json scripts if it exists
+    if [[ -f "package.json" ]]; then
+        # Find test script (try common names)
+        for script in "test" "test:unit" "vitest" "jest"; do
+            if grep -q "\"$script\":" package.json 2>/dev/null; then
+                test_cmd="$pkg_manager run $script"
+                # Add --run for vitest to prevent watch mode
+                if grep -q "vitest" package.json 2>/dev/null; then
+                    test_cmd="$pkg_manager test --run"
+                fi
+                break
+            fi
+        done
+
+        # Find e2e test script
+        for script in "test:e2e" "e2e" "test:integration" "playwright" "cypress"; do
+            if grep -q "\"$script\":" package.json 2>/dev/null; then
+                test_e2e_cmd="$pkg_manager run $script"
+                break
+            fi
+        done
+
+        # Find build script
+        for script in "build" "compile" "dist"; do
+            if grep -q "\"$script\":" package.json 2>/dev/null; then
+                build_cmd="$pkg_manager run $script"
+                break
+            fi
+        done
+
+        # Find db script
+        for script in "db:push" "db:migrate" "migrate" "prisma:push"; do
+            if grep -q "\"$script\":" package.json 2>/dev/null; then
+                db_cmd="$pkg_manager run $script"
+                break
+            fi
+        done
+
+        # Find dev script
+        for script in "dev" "start" "serve"; do
+            if grep -q "\"$script\":" package.json 2>/dev/null; then
+                dev_cmd="$pkg_manager run $script"
+                break
+            fi
+        done
+    fi
+
+    # Rails fallbacks
+    if [[ -f "bin/rails" ]]; then
+        [[ -z "$test_cmd" ]] && test_cmd="bin/rails test"
+        [[ -z "$db_cmd" ]] && db_cmd="bin/rails db:migrate"
+        [[ -z "$dev_cmd" ]] && dev_cmd="bin/rails server"
+    fi
+
+    # Python fallbacks
+    if [[ -f "pyproject.toml" ]] || [[ -f "requirements.txt" ]]; then
+        [[ -z "$test_cmd" ]] && test_cmd="pytest"
+    fi
+
+    # Detect e2e directory
+    for dir in "e2e" "tests/e2e" "test/e2e" "cypress" "playwright"; do
+        if [[ -d "$dir" ]]; then
+            e2e_dir="$dir"
+            break
+        fi
+    done
+
+    # Get file modification times for change detection
+    local pkg_mtime=""
+    local lock_mtime=""
+    if [[ -f "package.json" ]]; then
+        pkg_mtime=$(stat -f "%m" "package.json" 2>/dev/null || stat -c "%Y" "package.json" 2>/dev/null || echo "")
+    fi
+    for lockfile in bun.lockb yarn.lock pnpm-lock.yaml package-lock.json Gemfile.lock; do
+        if [[ -f "$lockfile" ]]; then
+            lock_mtime=$(stat -f "%m" "$lockfile" 2>/dev/null || stat -c "%Y" "$lockfile" 2>/dev/null || echo "")
+            break
+        fi
+    done
+
+    # Write config
+    cat > "$config_file" << EOF
+{
+  "discovered": "$(date -Iseconds)",
+  "package_manager": "$pkg_manager",
+  "commands": {
+    "test": "$test_cmd",
+    "test_e2e": "$test_e2e_cmd",
+    "build": "$build_cmd",
+    "db": "$db_cmd",
+    "dev": "$dev_cmd"
+  },
+  "paths": {
+    "e2e_dir": "$e2e_dir"
+  },
+  "mtimes": {
+    "package_json": "$pkg_mtime",
+    "lockfile": "$lock_mtime"
+  }
+}
+EOF
+
+    log_info "Project config saved to $config_file"
+}
+
+# Read a value from .borg/project.json
+# Usage: get_project_config "commands.test"
+get_project_config() {
+    local key="$1"
+    local config_file=".borg/project.json"
+
+    if [[ ! -f "$config_file" ]]; then
+        discover_project
+    fi
+
+    # Parse JSON with jq if available, otherwise grep
+    if command -v jq &>/dev/null; then
+        jq -r ".$key // empty" "$config_file" 2>/dev/null
+    else
+        # Fallback: simple grep for the value
+        grep "\"${key##*.}\":" "$config_file" 2>/dev/null | sed 's/.*: *"\([^"]*\)".*/\1/'
+    fi
+}
+
+# Check if project config files have changed since last discovery
+# Returns 0 if changed (needs rediscovery), 1 if unchanged
+check_config_changed() {
+    local config_file=".borg/project.json"
+
+    [[ ! -f "$config_file" ]] && return 0  # No config = needs discovery
+
+    # Get current mtimes
+    local current_pkg_mtime=""
+    local current_lock_mtime=""
+
+    if [[ -f "package.json" ]]; then
+        current_pkg_mtime=$(stat -f "%m" "package.json" 2>/dev/null || stat -c "%Y" "package.json" 2>/dev/null || echo "")
+    fi
+    for lockfile in bun.lockb yarn.lock pnpm-lock.yaml package-lock.json Gemfile.lock; do
+        if [[ -f "$lockfile" ]]; then
+            current_lock_mtime=$(stat -f "%m" "$lockfile" 2>/dev/null || stat -c "%Y" "$lockfile" 2>/dev/null || echo "")
+            break
+        fi
+    done
+
+    # Get stored mtimes
+    local stored_pkg_mtime stored_lock_mtime
+    if command -v jq &>/dev/null; then
+        stored_pkg_mtime=$(jq -r '.mtimes.package_json // empty' "$config_file" 2>/dev/null)
+        stored_lock_mtime=$(jq -r '.mtimes.lockfile // empty' "$config_file" 2>/dev/null)
+    else
+        stored_pkg_mtime=$(grep '"package_json"' "$config_file" 2>/dev/null | sed 's/.*: *"\([^"]*\)".*/\1/')
+        stored_lock_mtime=$(grep '"lockfile"' "$config_file" 2>/dev/null | sed 's/.*: *"\([^"]*\)".*/\1/')
+    fi
+
+    # Compare
+    if [[ "$current_pkg_mtime" != "$stored_pkg_mtime" ]] || [[ "$current_lock_mtime" != "$stored_lock_mtime" ]]; then
+        return 0  # Changed
+    fi
+    return 1  # Unchanged
+}
+
+# Run lightweight per-iteration checks (tests + lint on changed files)
+# Returns 0 if all pass, 1 if any fail
+# Sets ITERATION_ISSUES array with failures
+run_iteration_checks() {
+    ITERATION_ISSUES=()
+    local all_passed=true
+
+    # Ensure project is discovered
+    if [[ ! -f ".borg/project.json" ]]; then
+        discover_project
+    fi
+
+    # Check for config changes and rediscover if needed
+    if check_config_changed; then
+        log_info "Project config changed, rediscovering..."
+        discover_project
+
+        # Re-install dependencies if lockfile changed
+        local pkg_manager
+        pkg_manager=$(get_project_config "package_manager")
+        case "$pkg_manager" in
+            bun)  bun install 2>/dev/null ;;
+            npm)  npm install 2>/dev/null ;;
+            yarn) yarn install 2>/dev/null ;;
+            pnpm) pnpm install 2>/dev/null ;;
+            bundle) bundle install 2>/dev/null ;;
+        esac
+    fi
+
+    # Run tests
+    local test_cmd
+    test_cmd=$(get_project_config "commands.test")
+    if [[ -n "$test_cmd" ]]; then
+        log_info "Running tests: $test_cmd"
+        if ! eval "CI=true $test_cmd" 2>&1 | tail -20; then
+            ITERATION_ISSUES+=("Tests failed")
+            all_passed=false
+        fi
+    fi
+
+    # Run lint (only if there's a lint command in package.json)
+    local pkg_manager
+    pkg_manager=$(get_project_config "package_manager")
+    local lint_cmd=""
+    if [[ -f "package.json" ]] && grep -q '"lint"' package.json 2>/dev/null; then
+        lint_cmd="$pkg_manager run lint"
+    fi
+
+    if [[ -n "$lint_cmd" ]]; then
+        log_info "Running lint: $lint_cmd"
+        if ! eval "$lint_cmd" 2>&1 | tail -10; then
+            ITERATION_ISSUES+=("Lint failed")
+            all_passed=false
+        fi
+    fi
+
+    # Run typecheck if available
+    if [[ -f "package.json" ]] && grep -q '"typecheck"' package.json 2>/dev/null; then
+        local typecheck_cmd="$pkg_manager run typecheck"
+        log_info "Running typecheck: $typecheck_cmd"
+        if ! eval "$typecheck_cmd" 2>&1 | tail -10; then
+            ITERATION_ISSUES+=("Typecheck failed")
+            all_passed=false
+        fi
+    fi
+
+    if [[ "$all_passed" == "true" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Add a learning to .borg/learnings.json
+# Usage: add_learning "category" "learning text" "file1,file2"
+add_learning() {
+    local category="$1"
+    local learning="$2"
+    local files="${3:-}"
+    local spec="${4:-unknown}"
+    local iteration="${5:-0}"
+
+    mkdir -p .borg
+    local learnings_file=".borg/learnings.json"
+
+    # Initialize if doesn't exist
+    if [[ ! -f "$learnings_file" ]]; then
+        echo '{"learnings":[]}' > "$learnings_file"
+    fi
+
+    # Create new entry
+    local entry
+    entry=$(cat << EOF
+{
+  "date": "$(date -Iseconds)",
+  "spec": "$spec",
+  "iteration": $iteration,
+  "category": "$category",
+  "learning": "$learning",
+  "files": [$(echo "$files" | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/' | sed 's/""/null/g')]
+}
+EOF
+)
+
+    # Append to learnings array
+    if command -v jq &>/dev/null; then
+        jq ".learnings += [$entry]" "$learnings_file" > "$learnings_file.tmp" && mv "$learnings_file.tmp" "$learnings_file"
+    else
+        # Fallback: simple append (less clean but works)
+        sed -i '' 's/\]}/,'"$(echo "$entry" | tr '\n' ' ')"']}/' "$learnings_file" 2>/dev/null || \
+        sed -i 's/\]}/,'"$(echo "$entry" | tr '\n' ' ')"']}/' "$learnings_file"
+    fi
+}
+
+# Get recent learnings summary for context
+# Usage: get_learnings_summary [category] [limit]
+get_learnings_summary() {
+    local category="${1:-}"
+    local limit="${2:-10}"
+    local learnings_file=".borg/learnings.json"
+
+    [[ ! -f "$learnings_file" ]] && return
+
+    if command -v jq &>/dev/null; then
+        if [[ -n "$category" ]]; then
+            jq -r ".learnings | map(select(.category == \"$category\")) | .[-$limit:] | .[] | \"[\(.category)] \(.learning)\"" "$learnings_file" 2>/dev/null
+        else
+            jq -r ".learnings | .[-$limit:] | .[] | \"[\(.category)] \(.learning)\"" "$learnings_file" 2>/dev/null
+        fi
+    else
+        # Fallback: just show the file
+        tail -50 "$learnings_file"
+    fi
+}
+
+# Verify integration - ensure everything actually works
+# Discovery-based: reads commands from .borg/project.json
+# Returns 0 if all checks pass, 1 if any fail
+verify_integration() {
+    INTEGRATION_FAILURES=()
+    local all_passed=true
+
+    log_step "Verifying Integration"
+
+    # Ensure project is discovered
+    if [[ ! -f ".borg/project.json" ]]; then
+        log_info "Discovering project configuration..."
+        discover_project
+    fi
+
+    # 1. Start Docker services if docker-compose exists
+    if [[ -f "docker-compose.yml" ]] || [[ -f "docker-compose.yaml" ]]; then
+        log_info "Starting Docker services..."
+        if docker compose up -d 2>/dev/null; then
+            # Wait for services to be ready
+            local waited=0
+            local docker_ready=false
+            while [[ $waited -lt 30 ]]; do
+                if docker compose ps 2>/dev/null | grep -qiE "up|running|healthy"; then
+                    docker_ready=true
+                    break
+                fi
+                sleep 1
+                waited=$((waited + 1))
+            done
+            if [[ "$docker_ready" == "true" ]]; then
+                log_info "Docker services running"
+            else
+                log_warn "Docker services may not be fully healthy (waited ${waited}s)"
+            fi
+        else
+            INTEGRATION_FAILURES+=("Docker compose failed to start")
+            all_passed=false
+        fi
+    fi
+
+    # 2. Copy .env if needed
+    if [[ -f ".env.example" ]] && [[ ! -f ".env" ]]; then
+        log_info "Copying .env.example to .env..."
+        cp .env.example .env
+    fi
+
+    # 3. Run database migrations using discovered command
+    local db_cmd
+    db_cmd=$(get_project_config "commands.db")
+    if [[ -n "$db_cmd" ]]; then
+        log_info "Running database setup: $db_cmd"
+        if ! eval "$db_cmd" 2>/dev/null; then
+            INTEGRATION_FAILURES+=("Database setup failed: $db_cmd")
+            all_passed=false
+        fi
+    fi
+
+    # 4. Run tests using discovered command
+    local test_cmd
+    test_cmd=$(get_project_config "commands.test")
+    if [[ -n "$test_cmd" ]]; then
+        log_info "Running tests: $test_cmd"
+        if ! eval "CI=true $test_cmd" 2>/dev/null; then
+            INTEGRATION_FAILURES+=("Tests failed: $test_cmd")
+            all_passed=false
+        fi
+    else
+        log_warn "No test command discovered"
+    fi
+
+    # 5. Run e2e tests if discovered
+    local test_e2e_cmd
+    test_e2e_cmd=$(get_project_config "commands.test_e2e")
+    local e2e_dir
+    e2e_dir=$(get_project_config "paths.e2e_dir")
+
+    if [[ -n "$test_e2e_cmd" ]] && [[ -n "$e2e_dir" ]]; then
+        log_info "Running e2e tests: $test_e2e_cmd"
+
+        # Run e2e tests and capture output (use script for proper tty on macOS)
+        local e2e_output
+        local e2e_exit_code=0
+
+        # Create temp file for output
+        local e2e_temp
+        e2e_temp=$(mktemp)
+
+        # Run with CI=true to disable interactive features
+        eval "CI=true $test_e2e_cmd" > "$e2e_temp" 2>&1 || e2e_exit_code=$?
+
+        e2e_output=$(cat "$e2e_temp")
+        rm -f "$e2e_temp"
+
+        # Strip ANSI escape codes for reliable pattern matching
+        local e2e_clean
+        e2e_clean=$(echo "$e2e_output" | sed 's/\x1b\[[0-9;]*m//g' | sed 's/\x1b\[[0-9]*[A-Za-z]//g')
+
+        # Show summary of e2e results
+        local passed_line failed_line
+        passed_line=$(echo "$e2e_clean" | grep -oE "[0-9]+ passed" | head -1 || true)
+        failed_line=$(echo "$e2e_clean" | grep -oE "[0-9]+ failed" | head -1 || true)
+
+        if [[ -n "$passed_line" ]] || [[ -n "$failed_line" ]]; then
+            log_info "E2E results: ${passed_line:-0 passed}, ${failed_line:-0 failed}"
+        fi
+
+        # Check for port conflict (dev server already running)
+        if echo "$e2e_clean" | grep -q "already used\|reuseExistingServer"; then
+            log_warn "E2E skipped: dev server already running (set reuseExistingServer:true in playwright.config)"
+            # Don't fail - this is a config issue, not a test failure
+        # Check if ANY tests passed (some browsers may not be installed)
+        elif [[ -n "$passed_line" ]]; then
+            local passed_count
+            passed_count=$(echo "$passed_line" | grep -oE "[0-9]+")
+            if [[ $passed_count -gt 0 ]]; then
+                log_info "E2E tests: $passed_count passed (some browsers may have failed - OK)"
+            else
+                INTEGRATION_FAILURES+=("E2E tests failed - 0 tests passed")
+                all_passed=false
+            fi
+        else
+            # No "passed" found - show what we got for debugging
+            log_warn "E2E output (last 5 lines):"
+            echo "$e2e_clean" | tail -5
+            INTEGRATION_FAILURES+=("E2E tests failed - no tests passed")
+            all_passed=false
+        fi
+    fi
+
+    # 6. Check if build works using discovered command
+    local build_cmd
+    build_cmd=$(get_project_config "commands.build")
+    if [[ -n "$build_cmd" ]]; then
+        log_info "Verifying build: $build_cmd"
+        if ! eval "$build_cmd" 2>/dev/null; then
+            INTEGRATION_FAILURES+=("Build failed: $build_cmd")
+            all_passed=false
+        fi
+    fi
+
+    # 7. Verify dev server if API endpoints exist
+    if [[ -d "src/pages/api" ]] || [[ -d "pages/api" ]] || [[ -d "app/api" ]] || [[ -d "app/controllers" ]]; then
+        log_info "Checking API availability..."
+        local dev_url
+        dev_url=$(detect_dev_server 2>/dev/null || true)
+        if [[ -n "$dev_url" ]]; then
+            if curl -sf "$dev_url" > /dev/null 2>&1; then
+                log_info "Dev server responding at $dev_url"
+            else
+                log_warn "Dev server not responding at $dev_url (may need manual start)"
+            fi
+        fi
+    fi
+
+    # Report results
+    echo ""
+    if [[ "$all_passed" == "true" ]]; then
+        log_success "All integration checks passed!"
+        return 0
+    else
+        log_error "Integration verification failed:"
+        for failure in "${INTEGRATION_FAILURES[@]}"; do
+            echo "  - $failure"
+        done
+        return 1
+    fi
+}
+
+# Find the current/active spec directory
+# Priority: 1) building status, 2) most recently modified, 3) pending
+# Returns empty string if no spec found
+find_active_spec() {
+    local spec_dir=""
+
+    # First, look for a spec with "building" status
+    spec_dir=$(find "$SPECS_DIR" -name "SPEC.md" -exec grep -l "^status: building" {} \; 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+    if [[ -n "$spec_dir" ]]; then
+        echo "$spec_dir"
+        return 0
+    fi
+
+    # Next, look for most recently modified SPEC.md that's not complete
+    spec_dir=$(find "$SPECS_DIR" -name "SPEC.md" -newer "$SPECS_DIR" 2>/dev/null | while read -r f; do
+        if ! grep -q "^status: complete" "$f" 2>/dev/null; then
+            dirname "$f"
+            break
+        fi
+    done)
+    if [[ -n "$spec_dir" ]]; then
+        echo "$spec_dir"
+        return 0
+    fi
+
+    # Finally, any pending spec
+    spec_dir=$(find "$SPECS_DIR" -name "SPEC.md" -exec grep -l "^status: pending" {} \; 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+    if [[ -n "$spec_dir" ]]; then
+        echo "$spec_dir"
+        return 0
+    fi
+
+    return 1
+}
+
+# Find spec that needs fixing (has todos but no fix spec yet)
+find_spec_needing_fixes() {
+    local review_type="${1:-}"  # code, design, or empty for any
+
+    for spec_dir in "$SPECS_DIR"/*/; do
+        [[ -d "$spec_dir" ]] || continue
+
+        # Skip fix specs themselves
+        [[ "$spec_dir" == *"/fixes/"* ]] && continue
+
+        local todos_dir="$spec_dir/todos"
+
+        if [[ -n "$review_type" ]]; then
+            todos_dir="$spec_dir/todos/$review_type"
+        fi
+
+        # Check if todos exist
+        if [[ -d "$todos_dir" ]] && [[ -n "$(ls -A "$todos_dir"/*.md 2>/dev/null)" ]]; then
+            # Check if fix spec doesn't exist yet
+            local fix_dir="$spec_dir/fixes"
+            if [[ -n "$review_type" ]]; then
+                fix_dir="$spec_dir/fixes/$review_type"
+            fi
+
+            if [[ ! -f "$fix_dir/SPEC.md" ]]; then
+                echo "${spec_dir%/}"
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+# Get absolute path for a spec directory
+get_abs_spec_dir() {
+    local spec_dir="$1"
+    if [[ -d "$spec_dir" ]]; then
+        cd "$spec_dir" && pwd
+    else
+        echo ""
+    fi
+}
+
+generate_agents_md() {
+    local project_type="$1"
+    local output_file="$2"
+
+    cat > "$output_file" << 'HEADER'
+# AGENTS.md - Operational Guide
+
+This file contains build, test, and validation commands for this project.
+Updated automatically and manually with learnings during implementation.
+
+Keep this file under 60 lines. Status updates belong in SPEC.md.
+
+HEADER
+
+    case "$project_type" in
+        bun)
+            cat >> "$output_file" << 'BUN'
+## Build
+```bash
+bun install
+bun run build
+```
+
+## Test
+```bash
+bun test
+bun test --coverage
+```
+
+## Lint & Type Check
+```bash
+bun run lint
+bun run lint --fix
+bun run typecheck
+```
+
+## Development
+```bash
+bun run dev
+```
+
+## Learnings
+<!-- Add project-specific learnings here as you discover them -->
+
+BUN
+            ;;
+        npm|yarn|pnpm)
+            local pm="$project_type"
+            local run_cmd="$pm run"
+            [[ "$pm" == "npm" ]] && run_cmd="npm run"
+
+            cat >> "$output_file" << EOF
+## Build
+\`\`\`bash
+$pm install
+$run_cmd build
+\`\`\`
+
+## Test
+\`\`\`bash
+$run_cmd test
+$run_cmd test -- --coverage
+\`\`\`
+
+## Lint & Type Check
+\`\`\`bash
+$run_cmd lint
+$run_cmd lint --fix
+$run_cmd typecheck
+\`\`\`
+
+## Development
+\`\`\`bash
+$run_cmd dev
+\`\`\`
+
+## Learnings
+<!-- Add project-specific learnings here as you discover them -->
+
+EOF
+            ;;
+        rails)
+            cat >> "$output_file" << 'RAILS'
+## Build
+```bash
+bundle install
+bin/rails db:prepare
+```
+
+## Test
+```bash
+bin/rails test
+bin/rails test:system
+bundle exec rspec
+```
+
+## Lint & Type Check
+```bash
+bundle exec rubocop
+bundle exec rubocop -A
+bin/srb tc
+```
+
+## Security
+```bash
+bundle exec brakeman -q
+```
+
+## Development
+```bash
+bin/dev
+```
+
+## Learnings
+<!-- Add project-specific learnings here as you discover them -->
+
+RAILS
+            ;;
+        python)
+            cat >> "$output_file" << 'PYTHON'
+## Build
+```bash
+pip install -e .
+# or: poetry install / uv sync
+```
+
+## Test
+```bash
+pytest
+pytest --cov
+```
+
+## Lint & Type Check
+```bash
+ruff check .
+ruff check . --fix
+mypy .
+```
+
+## Development
+```bash
+python -m app
+# or: uvicorn app:app --reload
+```
+
+## Learnings
+<!-- Add project-specific learnings here as you discover them -->
+
+PYTHON
+            ;;
+        *)
+            cat >> "$output_file" << 'UNKNOWN'
+## Build
+```bash
+# Add your build command
+```
+
+## Test
+```bash
+# Add your test command
+```
+
+## Lint
+```bash
+# Add your lint command
+```
+
+## Learnings
+<!-- Add project-specific learnings here as you discover them -->
+
+UNKNOWN
+            ;;
+    esac
+}
+
+#=============================================================================
+# INIT COMMAND
+#=============================================================================
+
+cmd_init() {
+    local project_path="${1:-.}"
+    project_path="$(cd "$project_path" && pwd)"
+
+    log_step "Initializing Ralph Borg in $project_path"
+
+    # Detect project type
+    local project_type
+    project_type=$(detect_project_type "$project_path")
+    log_info "Detected project type: $project_type"
+
+    # Create directories
+    mkdir -p "$project_path/$SPECS_DIR"
+    mkdir -p "$project_path/$PLANS_DIR"
+    log_success "Created specs/ and plans/ directories"
+
+    # Generate AGENTS.md if it doesn't exist
+    if [[ ! -f "$project_path/AGENTS.md" ]]; then
+        generate_agents_md "$project_type" "$project_path/AGENTS.md"
+        log_success "Created AGENTS.md with $project_type commands"
+    else
+        log_warn "AGENTS.md already exists, skipping"
+    fi
+
+    # Copy templates
+    if [[ -d "$BORG_DIR/templates" ]]; then
+        cp -n "$BORG_DIR/templates/SPEC-template.md" "$project_path/$SPECS_DIR/" 2>/dev/null || true
+        log_success "Copied SPEC template to specs/"
+    fi
+
+    # Create .gitignore additions if needed
+    if [[ -f "$project_path/.gitignore" ]]; then
+        if ! grep -q "specs/.history" "$project_path/.gitignore" 2>/dev/null; then
+            echo -e "\n# Ralph Borg iteration logs\nspecs/.history/" >> "$project_path/.gitignore"
+            log_success "Added specs/.history/ to .gitignore"
+        fi
+    fi
+
+    echo ""
+    log_success "Ralph Borg initialized!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Review and customize AGENTS.md with your project's commands"
+    echo "  2. Create a plan:    borg plan \"your feature description\""
+    echo "  3. Convert to spec:  borg spec plans/your-feature.md"
+    echo "  4. Implement:        borg implement specs/your-feature/"
+    echo ""
+}
+
+#=============================================================================
+# PLAN COMMAND
+#=============================================================================
+
+cmd_plan() {
+    local description="$*"
+
+    if [[ -z "$description" ]]; then
+        log_error "Usage: borg plan <feature-description>"
+        exit 1
+    fi
+
+    log_step "Creating Plan: $description"
+
+    # Ensure plans directory exists
+    mkdir -p "$PLANS_DIR"
+
+    # Generate plan filename
+    local plan_name
+    plan_name=$(echo "$description" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-' | cut -c1-50)
+    local plan_file="$PLANS_DIR/${plan_name}.md"
+
+    echo ""
+    echo -e "${CYAN}Starting interactive planning session...${NC}"
+    echo ""
+    echo "You'll work with Claude to create and refine your plan."
+    echo "Claude will ask clarifying questions - answer them to shape the plan."
+    echo ""
+    echo "When planning is complete:"
+    echo "  1. Type /deepen-plan to enrich with research (recommended)"
+    echo "  2. Type 'exit' or Ctrl+C when satisfied"
+    echo ""
+    echo -e "${YELLOW}Starting Claude...${NC}"
+    echo ""
+
+    # Run Claude for planning with auto-permissions
+    # The user can answer questions, refine the plan, and run /deepen-plan
+    claude --dangerously-skip-permissions "/workflows:plan $description"
+
+    echo ""
+    log_success "Planning session complete!"
+    echo ""
+    echo "Your plan should be in the plans/ directory."
+    echo ""
+    echo "Next steps:"
+    echo "  1. Review the plan: ls plans/"
+    echo "  2. Convert to spec: borg spec plans/<plan-file>.md"
+    echo ""
+}
+
+#=============================================================================
+# SPEC COMMAND
+#=============================================================================
+
+cmd_spec() {
+    local plan_file="$1"
+
+    if [[ -z "$plan_file" ]] || [[ ! -f "$plan_file" ]]; then
+        log_error "Usage: borg spec <plan-file>"
+        log_error "Example: borg spec plans/user-authentication.md"
+        exit 1
+    fi
+
+    log_step "Converting Plan to SPEC"
+
+    # Extract feature name from plan file
+    local feature_name
+    feature_name=$(basename "$plan_file" .md)
+    local spec_dir="$SPECS_DIR/$feature_name"
+    local abs_plan_file
+    abs_plan_file=$(cd "$(dirname "$plan_file")" && pwd)/$(basename "$plan_file")
+
+    # Create spec directory
+    mkdir -p "$spec_dir"
+    local abs_spec_dir
+    abs_spec_dir=$(cd "$spec_dir" && pwd)
+
+    # Detect project type for quality gates
+    local project_type
+    project_type=$(detect_project_type ".")
+
+    # Generate quality gates based on project type
+    local quality_gates=""
+    case "$project_type" in
+        bun)
+            quality_gates="- [ ] Tests pass: \`bun test\`
+- [ ] Lint clean: \`bun run lint\`
+- [ ] Types check: \`bun run typecheck\`
+- [ ] Build succeeds: \`bun run build\`"
+            ;;
+        npm|yarn|pnpm)
+            quality_gates="- [ ] Tests pass: \`$project_type run test\`
+- [ ] Lint clean: \`$project_type run lint\`
+- [ ] Types check: \`$project_type run typecheck\`
+- [ ] Build succeeds: \`$project_type run build\`"
+            ;;
+        rails)
+            quality_gates="- [ ] Tests pass: \`bin/rails test\`
+- [ ] Lint clean: \`bundle exec rubocop\`
+- [ ] Security check: \`bundle exec brakeman -q\`"
+            ;;
+        python)
+            quality_gates="- [ ] Tests pass: \`pytest\`
+- [ ] Lint clean: \`ruff check .\`
+- [ ] Types check: \`mypy .\`"
+            ;;
+        *)
+            quality_gates="- [ ] Tests pass: \`<add test command>\`
+- [ ] Lint clean: \`<add lint command>\`"
+            ;;
+    esac
+
+    log_info "Reading plan and converting to SPEC format..."
+    echo ""
+
+    # Use Claude to convert plan to SPEC with enforced task structure
+    local conversion_prompt="You are converting a plan document into a SPEC.md file for autonomous implementation.
+
+READ the plan file: $abs_plan_file
+
+Then CREATE the file: $abs_spec_dir/SPEC.md
+
+The SPEC.md MUST follow this EXACT format with ENFORCED task structure:
+
+---
+name: $feature_name
+status: pending
+created: $(date '+%Y-%m-%d')
+plan_file: $plan_file
+iteration_count: 0
+project_type: $project_type
+---
+
+# Feature: [Title from plan]
+
+## Overview
+
+[2-3 sentence summary extracted from the plan]
+
+## Requirements
+
+[Convert the plan's requirements/goals into checkbox items]
+- [ ] Requirement 1
+- [ ] Requirement 2
+[etc.]
+
+## Tasks
+
+<!--
+TASK ORDERING RULES (ENFORCED):
+1. Setup tasks MUST be first (dependencies, config)
+2. Each implementation task MUST specify its test file
+3. UI tasks MUST specify visual verification
+4. NEVER create 'run tests' as a separate task at the end
+-->
+
+### Pending
+
+#### Phase 1: Setup (MUST COMPLETE BEFORE IMPLEMENTATION)
+- [ ] Task 1: Install dependencies and verify all quality gates run
+  - Run: \`$([[ \"$project_type\" == \"bun\" ]] && echo \"bun install\" || echo \"npm install\")\`
+  - Verify: All quality gate commands execute (even if they fail)
+  - **Blocker if skipped**: Cannot run backpressure without dependencies
+
+#### Phase 2: Implementation (Each task includes its own validation)
+[Break down the plan into small tasks. EACH TASK MUST INCLUDE:]
+
+- [ ] Task N: [Create/modify source file]
+  - File: \`src/path/to/file.ts\`
+  - Test: \`tests/unit/file.test.ts\` (CREATE IN SAME ITERATION)
+  - Validate: \`$([[ \"$project_type\" == \"bun\" ]] && echo \"bun lint && bun typecheck\" || echo \"npm run lint && npm run typecheck\")\`
+  - Visual: (if UI component) \`agent-browser screenshot localhost:PORT/path\`
+
+[Example for a UI component:]
+- [ ] Task N: Create Header component
+  - File: \`src/components/Header.tsx\`
+  - Test: \`tests/unit/Header.test.tsx\` (CREATE IN SAME ITERATION)
+  - Validate: \`bun lint && bun typecheck\`
+  - Visual: \`agent-browser screenshot localhost:3000\` (REQUIRED FOR UI)
+
+#### Phase 3: Integration (After all implementation tasks)
+- [ ] Task N: Run full test suite and verify all integrations work
+  - Run: Full test suite including E2E if applicable
+  - Visual: Full page screenshots with agent-browser (if UI)
+
+### In Progress
+
+### Completed
+
+### Blocked
+
+## Quality Gates
+
+<!--
+BACKPRESSURE RULES (ENFORCED):
+- Run after EVERY task completion, not just at the end
+- If a gate fails, fix it in the SAME iteration
+- If dependencies aren't installed, STOP and install them first
+-->
+
+### Per-Task Gates (run after each task)
+- [ ] Lint passes on changed files
+- [ ] Types check on changed files
+- [ ] Related tests pass (the test file you created with the source file)
+
+### Full Gates (run after each iteration)
+$quality_gates
+
+### Visual Gates (run after UI changes)
+- [ ] Screenshot captured with agent-browser
+- [ ] Visual diff acceptable (if baseline exists)
+
+## Exit Criteria
+
+[ALL must be true to mark complete]
+
+- [ ] All requirements checked off
+- [ ] All quality gates pass (not 'will pass later')
+- [ ] All tasks completed (including their test files)
+- [ ] Every source file has a corresponding test file
+- [ ] Code committed with meaningful messages
+- [ ] Ready for PR/review
+
+## Context
+
+### Key Files
+
+[From plan - list source files AND their corresponding test files]
+
+| Source File | Test File | Visual Check |
+|-------------|-----------|--------------|
+| \`src/path/to/file.ts\` | \`tests/unit/file.test.ts\` | No |
+| \`src/components/UI.tsx\` | \`tests/unit/UI.test.tsx\` | Yes - screenshot |
+
+### Patterns to Follow
+
+[Extract any patterns, conventions, or references mentioned in the plan]
+
+### Notes
+
+[Any important notes or considerations from the plan]
+
+## Iteration Log
+
+CRITICAL RULES:
+1. Task 1 MUST ALWAYS be 'Install dependencies' - NEVER start implementation without this
+2. EVERY implementation task MUST specify a test file to create IN THE SAME ITERATION
+3. UI tasks MUST include a Visual line with agent-browser command
+4. NEVER create 'run tests' or 'run lint' as separate tasks at the end - these run PER TASK
+5. Extract ALL requirements from the plan - don't leave any out
+6. Break tasks down small enough to complete in one iteration (~15-30 min each)
+7. Tasks should be specific and actionable, not vague
+8. Include file paths where known
+9. Copy any patterns/conventions mentioned in the plan to the Patterns section
+10. DO NOT include placeholder text like 'Requirement 1' - use actual content from the plan
+
+Write the SPEC.md file now."
+
+    # Run Claude to do the conversion
+    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print
+
+    # Verify SPEC.md was created
+    if [[ ! -f "$spec_dir/SPEC.md" ]]; then
+        log_error "SPEC.md was not created. Creating minimal template..."
+        # Fallback to template if Claude didn't create it
+        cat > "$spec_dir/SPEC.md" << EOF
+---
+name: $feature_name
+status: pending
+created: $(date '+%Y-%m-%d')
+plan_file: $plan_file
+iteration_count: 0
+project_type: $project_type
+---
+
+# Feature: $feature_name
+
+## Overview
+
+See plan file for details.
+
+## Requirements
+
+- [ ] See plan file
+
+## Tasks
+
+### Pending
+
+- [ ] Review plan and break down tasks
+
+### In Progress
+
+### Completed
+
+### Blocked
+
+## Quality Gates
+
+$quality_gates
+
+## Exit Criteria
+
+- [ ] All requirements checked off
+- [ ] All quality gates pass
+- [ ] All tasks completed
+
+## Context
+
+### Key Files
+
+See plan file.
+
+### Patterns to Follow
+
+See plan file.
+
+### Notes
+
+## Iteration Log
+EOF
+    fi
+
+    log_success "Created $spec_dir/SPEC.md"
+
+    # Copy the PROMPT template or create inline
+    if [[ -f "$BORG_DIR/templates/PROMPT-template.md" ]]; then
+        cp "$BORG_DIR/templates/PROMPT-template.md" "$spec_dir/PROMPT.md"
+        log_success "Created $spec_dir/PROMPT.md (from template)"
+    else
+        # Fallback: create inline with enforced backpressure
+        cat > "$spec_dir/PROMPT.md" << 'PROMPT'
+# Ralph Loop - Build Iteration
+
+You are in an autonomous implementation loop. Each iteration has fresh context.
+Your state persists ONLY through files (SPEC.md, git commits, Notes section).
+
+---
+
+## Phase 0: Pre-Flight Check (MANDATORY - DO NOT SKIP)
+
+Before ANY implementation work, verify backpressure is possible:
+
+```bash
+# Can quality gates run?
+bun --version      # Package manager works?
+bun test --help    # Test runner available?
+bun lint --help    # Linter available?
+```
+
+**IF ANY FAIL:**
+1. Run `bun install` immediately
+2. Verify all gates now work
+3. Only then proceed to Phase 1
+
+**HARD RULE:** You cannot validate code without working quality gates.
+
+---
+
+## Phase 1: Orient (Load Fresh Context)
+
+Study these files in order:
+1. **SPEC.md** - Single source of truth for this feature
+2. **Plan file** - Referenced in SPEC.md frontmatter
+3. **AGENTS.md** (if exists) - Build/test commands
+4. **Key Files** - Listed in SPEC.md Context section
+
+---
+
+## Phase 2: Select Task
+
+**ONLY ONE TASK PER ITERATION. Focus beats breadth.**
+
+1. If a task is "In Progress" → Continue that task
+2. Otherwise → Pick the first "Pending" task
+3. Move selected task to "In Progress" BEFORE starting work
+
+---
+
+## Phase 3: Investigate (DON'T ASSUME NOT IMPLEMENTED)
+
+Before writing ANY new code:
+1. Search for existing implementations (Grep/Glob)
+2. Check if task is partially done
+3. Update Notes with discoveries
+
+---
+
+## Phase 4: Implement (WITH TESTS - NOT AFTER)
+
+### HARD RULE: Source file + Test file = SAME ITERATION
+
+```
+❌ Iteration 5: Create Counter.svelte
+   Iteration 25: Create Counter.test.ts  ← TOO LATE
+
+✅ Iteration 5: Create Counter.svelte AND Counter.test.ts
+```
+
+### For UI components - take screenshot:
+```
+/agent-browser screenshot http://localhost:PORT/path
+```
+
+---
+
+## Phase 5: Validate (IMMEDIATELY - NOT DEFERRED)
+
+**Run quality gates NOW:**
+
+```bash
+bun lint [files-you-changed]
+bun typecheck
+bun test [test-file-you-created]
+```
+
+| Failure Type | Action |
+|--------------|--------|
+| Quick fix | Fix NOW in this iteration |
+| Complex | Note issue, continue if non-blocking |
+| Blocker | Move task to "Blocked", pick another |
+
+**HARD RULE:** Do not mark task complete if tests don't exist or don't pass.
+
+---
+
+## Phase 6: Visual Verification (FOR UI CHANGES)
+
+If you modified anything visual:
+1. Take screenshot: `/agent-browser screenshot http://localhost:PORT`
+2. Log in iteration: `**Visual:** Screenshot at localhost:PORT`
+
+---
+
+## Phase 7: Update State
+
+1. Move task to "Completed" with iteration number
+2. Add learnings to "Notes" section
+3. Update `iteration_count` in frontmatter
+4. Add to "Iteration Log"
+
+---
+
+## Phase 8: Commit & Check Exit
+
+1. Commit: `git commit -m "feat(feature): [what]"`
+2. Check ALL exit criteria
+3. If ALL met: output `<loop-complete>Feature complete.</loop-complete>`
+
+---
+
+## HARD RULES (NEVER VIOLATE)
+
+1. **Dependencies First** - Install before implementation
+2. **Tests With Code** - Each source file gets a test file IN SAME ITERATION
+3. **Validate Immediately** - Run tests after EVERY task
+4. **Visual for UI** - Screenshot required for UI changes
+5. **One Task Per Iteration** - Complete fully, then stop
+
+---
+
+## Completion Signal
+
+When complete, output: `<loop-complete>Feature complete. All exit criteria met.</loop-complete>`
+PROMPT
+        log_success "Created $spec_dir/PROMPT.md (inline)"
+    fi
+
+    # Create iteration history directory
+    mkdir -p "$spec_dir/.history"
+
+    echo ""
+    log_success "Spec created at $spec_dir/"
+    echo ""
+    echo "The SPEC.md has been populated from your plan."
+    echo ""
+    echo "Next steps:"
+    echo "  1. Review: cat $spec_dir/SPEC.md"
+    echo "  2. (Optional) Adjust tasks or add context if needed"
+    echo "  3. Implement: borg implement $spec_dir"
+    echo ""
+}
+
+#=============================================================================
+# IMPLEMENT COMMAND
+#=============================================================================
+
+cmd_implement() {
+    local spec_dir="${1:-}"
+
+    # If no spec dir provided, find one with status: building or pending
+    if [[ -z "$spec_dir" ]]; then
+        # Priority 1: Look for fix specs with building status
+        spec_dir=$(find "$SPECS_DIR" -path "*/fixes/*" -name "SPEC.md" -exec grep -l "status: building" {} \; 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+
+        # Priority 2: Look for fix specs with pending status
+        if [[ -z "$spec_dir" ]]; then
+            spec_dir=$(find "$SPECS_DIR" -path "*/fixes/*" -name "SPEC.md" -exec grep -l "status: pending" {} \; 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+        fi
+
+        # Priority 3: Look for regular specs with building status
+        if [[ -z "$spec_dir" ]]; then
+            spec_dir=$(find "$SPECS_DIR" -maxdepth 2 -name "SPEC.md" ! -path "*/fixes/*" -exec grep -l "status: building" {} \; 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+        fi
+
+        # Priority 4: Look for regular specs with pending status
+        if [[ -z "$spec_dir" ]]; then
+            spec_dir=$(find "$SPECS_DIR" -maxdepth 2 -name "SPEC.md" ! -path "*/fixes/*" -exec grep -l "status: pending" {} \; 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+        fi
+
+        if [[ -z "$spec_dir" ]]; then
+            log_error "No active spec found. Create one with: borg spec <plan-file>"
+            exit 1
+        fi
+    fi
+
+    local spec_file="$spec_dir/SPEC.md"
+    local prompt_file="$spec_dir/PROMPT.md"
+
+    if [[ ! -f "$spec_file" ]]; then
+        log_error "SPEC.md not found in $spec_dir"
+        exit 1
+    fi
+
+    if [[ ! -f "$prompt_file" ]]; then
+        log_error "PROMPT.md not found in $spec_dir"
+        exit 1
+    fi
+
+    # Check if already complete
+    if grep -q "status: complete" "$spec_file"; then
+        log_warn "This spec is already marked complete."
+        read -p "Reset to 'building' and continue? [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 0
+        fi
+        sed -i '' 's/status: complete/status: building/' "$spec_file"
+    fi
+
+    # Update status to building
+    sed -i '' 's/status: pending/status: building/' "$spec_file" 2>/dev/null || true
+
+    log_step "Starting Ralph Borg Loop"
+    echo "Spec:           $spec_file"
+    echo "Max iterations: $MAX_ITERATIONS"
+    echo "Delay:          ${ITERATION_DELAY}s between iterations"
+    echo ""
+    echo "Press Ctrl+C to stop at any time."
+    echo ""
+
+    local iteration=0
+    local history_dir="$spec_dir/.history"
+    mkdir -p "$history_dir"
+
+    # Get absolute path to spec directory
+    local abs_spec_dir
+    abs_spec_dir=$(cd "$spec_dir" && pwd)
+
+    while [[ $iteration -lt $MAX_ITERATIONS ]]; do
+        iteration=$((iteration + 1))
+        local timestamp
+        timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+        # Check for shutdown before starting iteration
+        if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
+            log_info "Shutdown requested. Stopping loop."
+            exit 130
+        fi
+
+        # Check if all tasks are already complete before starting iteration
+        local pending_tasks completed_tasks
+        pending_tasks=$(grep -c "^\- \[ \]" "$spec_file" 2>/dev/null || true)
+        completed_tasks=$(grep -c "^\- \[x\]" "$spec_file" 2>/dev/null || true)
+        pending_tasks=${pending_tasks:-0}
+        completed_tasks=${completed_tasks:-0}
+
+        if [[ $pending_tasks -eq 0 ]] && [[ $completed_tasks -gt 0 ]]; then
+            log_info "All tasks complete ($completed_tasks tasks). Running final verification..."
+
+            # Run integration verification
+            if verify_integration; then
+                log_success "All tasks complete and verified!"
+                sed -i '' 's/status: building/status: complete/' "$spec_file" 2>/dev/null || \
+                sed -i 's/status: building/status: complete/' "$spec_file"
+                echo ""
+                echo "Next steps:"
+                echo "  1. Review changes: git diff main"
+                echo "  2. Run code review: borg review"
+                echo "  3. Create PR when ready"
+                exit 0
+            else
+                log_warn "Tasks complete but integration failed. Adding fix task..."
+                {
+                    echo ""
+                    echo "### Integration Fix Required (Auto-added)"
+                    echo "- [ ] Fix integration failures: ${INTEGRATION_FAILURES[*]}"
+                } >> "$spec_file"
+                # Continue to let the loop handle it
+            fi
+        fi
+
+        echo ""
+        echo -e "${CYAN}${BOLD}=== Iteration $iteration ($timestamp) ===${NC}"
+        echo ""
+
+        # Log file for this iteration
+        local log_file="$history_dir/$(printf '%03d' $iteration)-$(date '+%Y%m%d-%H%M%S').md"
+
+        # Build iteration context
+        local issues_context=""
+        if [[ -n "${PENDING_ISSUES:-}" ]]; then
+            issues_context="
+ISSUES FROM PREVIOUS ITERATION (fix these first!):
+- ${PENDING_ISSUES}
+
+Before continuing with tasks, address these issues."
+        fi
+
+        local learnings_context=""
+        if [[ -f ".borg/learnings.json" ]]; then
+            local recent_learnings
+            recent_learnings=$(get_learnings_summary "" 5 2>/dev/null)
+            if [[ -n "$recent_learnings" ]]; then
+                learnings_context="
+
+LEARNINGS FROM PREVIOUS ITERATIONS (reference these):
+$recent_learnings"
+            fi
+        fi
+
+        # Create the iteration prompt
+        local iteration_prompt="You are in iteration $iteration of a Ralph Borg implementation loop.
+
+CRITICAL INSTRUCTIONS:
+1. Read $abs_spec_dir/SPEC.md - this is your single source of truth
+2. Read $abs_spec_dir/PROMPT.md - this contains your detailed instructions
+3. Follow the phases in PROMPT.md exactly
+4. Complete ONE task, run quality checks, update SPEC.md
+5. If ALL exit criteria are met, output <loop-complete>Feature complete</loop-complete>
+$issues_context$learnings_context
+
+Start by reading both files now."
+
+        # Run Claude with the iteration prompt
+        # Initialize log file
+        {
+            echo "# Iteration $iteration"
+            echo "Started: $timestamp"
+            echo "Spec: $abs_spec_dir/SPEC.md"
+            echo ""
+            echo "## Output"
+            echo ""
+        } > "$log_file"
+
+        # Check for shutdown request
+        if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
+            log_info "Shutdown requested. Stopping loop."
+            exit 130
+        fi
+
+        # Run the iteration with retry logic
+        if ! run_claude_with_retry "$iteration_prompt" "$log_file"; then
+            CONSECUTIVE_FAILURES=$((CONSECUTIVE_FAILURES + 1))
+            log_warn "Iteration $iteration failed after retries. (Consecutive failures: $CONSECUTIVE_FAILURES/$MAX_CONSECUTIVE_FAILURES)"
+
+            # Add failure note to log
+            {
+                echo ""
+                echo "## Iteration Failed"
+                echo "This iteration failed after $MAX_RETRIES retries."
+                echo "Consecutive failures: $CONSECUTIVE_FAILURES"
+            } >> "$log_file"
+
+            # Check for too many consecutive failures
+            if [[ $CONSECUTIVE_FAILURES -ge $MAX_CONSECUTIVE_FAILURES ]]; then
+                echo ""
+                log_error "Too many consecutive failures ($CONSECUTIVE_FAILURES). Stopping to prevent infinite loop."
+                log_error "This usually means:"
+                log_error "  - API is having issues (wait and try again)"
+                log_error "  - Network connectivity problems"
+                log_error "  - Rate limiting"
+                echo ""
+                log_info "Resume when ready: borg implement $spec_dir"
+                exit 1
+            fi
+
+            sleep "$ITERATION_DELAY"
+            continue
+        fi
+
+        # Success - reset consecutive failures
+        CONSECUTIVE_FAILURES=0
+
+        # Run per-iteration checks (tests, lint, typecheck)
+        log_info "Running per-iteration checks..."
+        if ! run_iteration_checks; then
+            log_warn "Per-iteration checks failed. Next iteration will address these issues."
+
+            # Prepare issues for next iteration prompt
+            PENDING_ISSUES="${ITERATION_ISSUES[*]}"
+
+            # Add note to log
+            {
+                echo ""
+                echo "## Per-Iteration Checks"
+                echo "Failed: ${ITERATION_ISSUES[*]}"
+            } >> "$log_file"
+
+            # Record learning about the failure
+            add_learning "iteration_failure" "Iteration $iteration had issues: ${ITERATION_ISSUES[*]}" "" "$(basename "$spec_dir")" "$iteration"
+        else
+            log_success "Per-iteration checks passed"
+            PENDING_ISSUES=""
+
+            # Add success note to log
+            {
+                echo ""
+                echo "## Per-Iteration Checks"
+                echo "All checks passed (tests, lint, typecheck)"
+            } >> "$log_file"
+        fi
+
+        # Check for completion signal in log (support both old and new format)
+        if grep -qE "<loop-complete>|<promise>COMPLETE</promise>" "$log_file"; then
+            echo ""
+            log_info "Claude signals completion. Verifying integration..."
+
+            # Detect project type for verification
+            local project_type
+            project_type=$(detect_project_type ".")
+
+            # Run integration verification
+            if verify_integration "$project_type"; then
+                # Integration passed - truly complete
+                log_success "Feature complete after $iteration iterations!"
+
+                # Update spec status
+                sed -i '' 's/status: building/status: complete/' "$spec_file"
+
+                echo ""
+                echo "Next steps:"
+                echo "  1. Review changes: git diff main"
+                echo "  2. Run code review: borg review"
+                echo "  3. Fix any issues:  borg fix && borg implement"
+                echo "  4. Document learnings: claude /workflows:compound"
+                echo "  5. Create PR when ready"
+                echo ""
+                exit 0
+            else
+                # Integration failed - continue loop to fix
+                log_warn "Integration verification failed. Continuing loop to fix issues..."
+                echo ""
+
+                # Create a new iteration prompt focused on fixing integration
+                local fix_prompt="INTEGRATION VERIFICATION FAILED
+
+The following integration checks failed:
+$(for f in "${INTEGRATION_FAILURES[@]}"; do echo "- $f"; done)
+
+You must fix these issues before the feature can be considered complete.
+
+1. Read the SPEC.md to understand the context
+2. Investigate why each integration check failed
+3. Fix the root cause (not just suppress errors)
+4. Verify the fix works
+5. Update SPEC.md notes with what you learned
+
+Do NOT output <loop-complete> until integration actually passes.
+
+Start by investigating the first failure: ${INTEGRATION_FAILURES[0]}"
+
+                # Add a task to SPEC for fixing integration
+                {
+                    echo ""
+                    echo "### Integration Fix Required (Auto-added)"
+                    echo "- [ ] Fix integration failures: ${INTEGRATION_FAILURES[*]}"
+                } >> "$spec_file"
+
+                # Continue to next iteration with the fix prompt
+                sleep "$ITERATION_DELAY"
+                continue
+            fi
+        fi
+
+        # Check if spec was marked complete manually
+        if grep -q "status: complete" "$spec_file"; then
+            echo ""
+            log_success "Spec marked complete after $iteration iterations!"
+            exit 0
+        fi
+
+        # Delay before next iteration
+        log_info "Waiting ${ITERATION_DELAY}s before next iteration..."
+        sleep "$ITERATION_DELAY"
+    done
+
+    echo ""
+    log_warn "Max iterations ($MAX_ITERATIONS) reached without completion."
+    echo ""
+    echo "Options:"
+    echo "  1. Review SPEC.md to see current progress"
+    echo "  2. Run 'borg implement $spec_dir' to continue"
+    echo "  3. Increase MAX_ITERATIONS: MAX_ITERATIONS=100 borg implement $spec_dir"
+    echo ""
+    exit 1
+}
+
+#=============================================================================
+# REVIEW COMMAND
+#=============================================================================
+
+cmd_review() {
+    local spec_dir=""
+    local review_type="code"  # code, design, or both
+    local design_url=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --design)
+                if [[ "$review_type" == "code" ]]; then
+                    review_type="both"
+                fi
+                shift
+                ;;
+            --design-only)
+                review_type="design"
+                shift
+                ;;
+            --url)
+                design_url="$2"
+                shift 2
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                exit 1
+                ;;
+            *)
+                spec_dir="$1"
+                shift
+                ;;
+        esac
+    done
+
+    # Determine review type label
+    local review_label
+    case "$review_type" in
+        code)   review_label="Code Review" ;;
+        design) review_label="Design Review" ;;
+        both)   review_label="Code + Design Review" ;;
+    esac
+
+    log_step "Running $review_label"
+
+    # Find spec if not provided
+    if [[ -z "$spec_dir" ]] || [[ ! -d "$spec_dir" ]]; then
+        spec_dir=$(find_active_spec || true)
+        if [[ -z "$spec_dir" ]]; then
+            log_error "No active spec found."
+            log_error "Either specify a spec: borg review specs/my-feature/"
+            log_error "Or create one first:   borg spec plans/my-feature.md"
+            exit 1
+        fi
+    fi
+
+    # Validate spec exists
+    if [[ ! -f "$spec_dir/SPEC.md" ]]; then
+        log_error "No SPEC.md found in $spec_dir"
+        exit 1
+    fi
+
+    local spec_name
+    spec_name=$(basename "$spec_dir")
+    log_info "Reviewing spec: $spec_name"
+
+    # Get absolute path for spec
+    local abs_spec_dir
+    abs_spec_dir=$(cd "$spec_dir" && pwd)
+
+    # Create todos directories within the spec
+    local code_todos_dir="$abs_spec_dir/todos/code"
+    local design_todos_dir="$abs_spec_dir/todos/design"
+
+    # Run code review
+    if [[ "$review_type" == "code" ]] || [[ "$review_type" == "both" ]]; then
+        mkdir -p "$code_todos_dir"
+
+        log_info "Running code review..."
+        log_info "Findings will be saved to: $spec_name/todos/code/"
+        echo ""
+
+        local code_review_prompt="You are reviewing code changes for the spec: $spec_name
+
+SPEC FILE: $abs_spec_dir/SPEC.md
+
+Run /workflows:review to perform comprehensive code review.
+
+IMPORTANT: Save all todo files to this directory:
+$code_todos_dir/
+
+Name files like: 001-p1-issue-name.md, 002-p2-issue-name.md, etc.
+
+Use this format for todos:
+---
+priority: p1|p2|p3
+tags: [security|performance|architecture|etc]
+spec: $spec_name
+type: code
+---
+# [Issue Title]
+
+## Problem Statement
+[What's wrong]
+
+## Findings
+- File: \`path/to/file.ts:line\`
+
+## Recommended Action
+[How to fix]
+
+## Acceptance Criteria
+- [ ] [Specific outcome]
+
+Run the review now."
+
+        echo "$code_review_prompt" | claude --dangerously-skip-permissions --print
+        echo ""
+    fi
+
+    # Run design review
+    if [[ "$review_type" == "design" ]] || [[ "$review_type" == "both" ]]; then
+        mkdir -p "$design_todos_dir"
+
+        log_info "Running design review..."
+
+        # Auto-detect dev server if no URL provided
+        if [[ -z "$design_url" ]]; then
+            design_url=$(detect_dev_server 2>/dev/null || true)
+        fi
+
+        if [[ -z "$design_url" ]]; then
+            log_warn "No dev server detected for design review."
+            log_warn "Start your dev server or use: borg review --design --url http://localhost:3000"
+        else
+            log_info "Design review target: $design_url"
+            log_info "Findings will be saved to: $spec_name/todos/design/"
+            echo ""
+
+            local design_review_prompt="You are reviewing UI design for the spec: $spec_name
+
+TARGET URL: $design_url
+SPEC FILE: $abs_spec_dir/SPEC.md
+
+INSTRUCTIONS:
+1. Take a screenshot of $design_url using agent-browser
+
+2. Analyze the design critically for these issues:
+   - Bland/generic appearance (looks like every other AI-generated site)
+   - Poor typography choices (default fonts, inconsistent sizing)
+   - Weak color palette (too much gray, no personality)
+   - Bad spacing/rhythm (cramped or overly sparse)
+   - Missing visual hierarchy
+   - Generic components (default buttons, inputs)
+   - Lack of personality or brand identity
+
+3. For each issue found, create a todo file in:
+   $design_todos_dir/
+
+   Name files like: 001-p2-bland-hero.md, 002-p2-weak-typography.md
+
+4. Use this format:
+---
+priority: p2
+tags: [design, ui]
+spec: $spec_name
+type: design
+---
+# [Issue Title]
+
+## Problem Statement
+[What's wrong with the current design]
+
+## Findings
+- File: \`path/to/component.tsx\`
+- Screenshot: [describe what you see]
+
+## Recommended Action
+[Specific design improvement]
+
+## Acceptance Criteria
+- [ ] [Specific visual outcome]
+
+Focus on actionable, specific issues - not vague feedback like 'make it prettier'."
+
+            echo "$design_review_prompt" | claude --dangerously-skip-permissions --print
+            echo ""
+        fi
+    fi
+
+    # Count findings
+    local code_count=0
+    local design_count=0
+
+    if [[ -d "$code_todos_dir" ]]; then
+        code_count=$(find "$code_todos_dir" -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    if [[ -d "$design_todos_dir" ]]; then
+        design_count=$(find "$design_todos_dir" -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+
+    local total_count=$((code_count + design_count))
+
+    log_success "Review complete!"
+    echo ""
+    echo "Spec:     $spec_name"
+    echo "Findings: $code_count code, $design_count design ($total_count total)"
+    echo ""
+    echo "Todos saved to:"
+    [[ $code_count -gt 0 ]] && echo "  - $spec_name/todos/code/ ($code_count files)"
+    [[ $design_count -gt 0 ]] && echo "  - $spec_name/todos/design/ ($design_count files)"
+    echo ""
+    echo "Next steps:"
+    echo "  1. View findings:    ls $spec_dir/todos/"
+    [[ $code_count -gt 0 ]] && echo "  2. Fix code issues:  borg fix code"
+    [[ $design_count -gt 0 ]] && echo "  3. Fix design:       borg fix design"
+    echo "  4. Fix all:          borg fix"
+    if [[ "$review_type" == "code" ]]; then
+        echo ""
+        echo "  Run design review:   borg review --design"
+    fi
+    echo ""
+}
+
+#=============================================================================
+# FIX COMMAND
+#=============================================================================
+
+cmd_fix() {
+    local fix_type=""
+    local spec_dir=""
+
+    # Parse arguments: borg fix [code|design] [spec-dir]
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            code|design)
+                fix_type="$1"
+                shift
+                ;;
+            *)
+                # Assume it's a spec directory
+                if [[ -d "$1" ]]; then
+                    spec_dir="$1"
+                else
+                    log_error "Unknown argument or directory not found: $1"
+                    log_error "Usage: borg fix [code|design] [spec-dir]"
+                    exit 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Find spec if not provided
+    if [[ -z "$spec_dir" ]]; then
+        spec_dir=$(find_active_spec || true)
+        if [[ -z "$spec_dir" ]]; then
+            log_error "No active spec found."
+            log_error "Specify a spec: borg fix specs/my-feature/"
+            exit 1
+        fi
+    fi
+
+    # Validate spec
+    if [[ ! -f "$spec_dir/SPEC.md" ]]; then
+        log_error "No SPEC.md found in $spec_dir"
+        exit 1
+    fi
+
+    local spec_name
+    spec_name=$(basename "$spec_dir")
+
+    local abs_spec_dir
+    abs_spec_dir=$(cd "$spec_dir" && pwd)
+
+    # Determine what to fix
+    local fix_label
+    local todos_dirs=()
+
+    if [[ -z "$fix_type" ]]; then
+        # Fix all - code first, then design
+        fix_label="All Issues"
+        [[ -d "$abs_spec_dir/todos/code" ]] && todos_dirs+=("$abs_spec_dir/todos/code")
+        [[ -d "$abs_spec_dir/todos/design" ]] && todos_dirs+=("$abs_spec_dir/todos/design")
+    elif [[ "$fix_type" == "code" ]]; then
+        fix_label="Code Issues"
+        todos_dirs+=("$abs_spec_dir/todos/code")
+    elif [[ "$fix_type" == "design" ]]; then
+        fix_label="Design Issues"
+        todos_dirs+=("$abs_spec_dir/todos/design")
+    fi
+
+    log_step "Creating Fix Spec: $fix_label"
+    log_info "Source spec: $spec_name"
+
+    # Check todos exist
+    local todo_files=()
+    for todos_dir in "${todos_dirs[@]}"; do
+        if [[ -d "$todos_dir" ]]; then
+            while IFS= read -r file; do
+                [[ -n "$file" ]] && todo_files+=("$file")
+            done < <(find "$todos_dir" -name "*.md" 2>/dev/null)
+        fi
+    done
+
+    local todo_count=${#todo_files[@]}
+
+    if [[ $todo_count -eq 0 ]]; then
+        log_warn "No todos found to fix."
+        echo ""
+        echo "Run a review first:"
+        echo "  borg review              # Code review"
+        echo "  borg review --design     # Design review"
+        exit 1
+    fi
+
+    log_info "Found $todo_count todos to convert"
+
+    # Create fix spec directory within the parent spec
+    local fix_dir="$abs_spec_dir/fixes"
+    if [[ -n "$fix_type" ]]; then
+        fix_dir="$abs_spec_dir/fixes/$fix_type"
+    fi
+    mkdir -p "$fix_dir"
+
+    # Get absolute paths for todo files
+    local abs_todo_files=""
+    for file in "${todo_files[@]}"; do
+        abs_todo_files+="$file"$'\n'
+    done
+
+    # Detect project type for quality gates
+    local project_type
+    project_type=$(detect_project_type ".")
+
+    # Pre-compute dynamic content
+    local today_date
+    today_date=$(date '+%Y-%m-%d')
+
+    local quality_gates=""
+    case "$project_type" in
+        bun)
+            quality_gates="- [ ] Tests pass: \`bun test\`
+- [ ] Lint clean: \`bun run lint\`
+- [ ] Types check: \`bun run typecheck\`"
+            ;;
+        npm|yarn|pnpm)
+            quality_gates="- [ ] Tests pass: \`$project_type run test\`
+- [ ] Lint clean: \`$project_type run lint\`
+- [ ] Types check: \`$project_type run typecheck\`"
+            ;;
+        rails)
+            quality_gates="- [ ] Tests pass: \`bin/rails test\`
+- [ ] Lint clean: \`bundle exec rubocop\`"
+            ;;
+        python)
+            quality_gates="- [ ] Tests pass: \`pytest\`
+- [ ] Lint clean: \`ruff check .\`
+- [ ] Types check: \`mypy .\`"
+            ;;
+        *)
+            quality_gates="- [ ] Tests pass
+- [ ] Lint clean"
+            ;;
+    esac
+
+    local fix_type_label="${fix_type:-all}"
+
+    log_info "Converting todos to fix SPEC..."
+    echo ""
+
+    # Use Claude to convert todos to SPEC format
+    local conversion_prompt="Convert review findings into a SPEC.md for implementation.
+
+PARENT SPEC: $spec_name
+FIX TYPE: $fix_type_label
+
+READ these todo files:
+$abs_todo_files
+
+CREATE the file: $fix_dir/SPEC.md
+
+Follow this EXACT format:
+
+---
+name: ${spec_name}-fixes-${fix_type_label}
+status: pending
+created: $today_date
+parent_spec: $spec_name
+fix_type: $fix_type_label
+todo_count: $todo_count
+iteration_count: 0
+project_type: $project_type
+---
+
+# Fix: $spec_name ($fix_type_label)
+
+## Overview
+
+This spec addresses $todo_count ${fix_type_label} findings from review of $spec_name.
+
+## Requirements
+
+[Convert each todo's Problem Statement into a requirement checkbox]
+
+## Tasks
+
+### Pending
+
+#### Phase 1: Setup
+- [ ] Task 1: Verify dependencies and quality gates work
+  - Run: Install any missing dependencies
+  - Verify: All lint/test commands execute
+
+#### Phase 2: Fixes (ordered by priority - P1 first, then P2, then P3)
+
+[For each todo file, create a task like this:]
+
+- [ ] Task N: [Fix description from todo]
+  - File: \`path/to/file.ts\` (from todo's Findings section)
+  - Reference: \`[relative path to todo]\`
+  - Acceptance:
+    [Copy the Acceptance Criteria from the todo]
+
+#### Phase 3: Verification
+- [ ] Task N: Run full test suite and verify all fixes work
+  - Run: Full test suite
+  - Validate: All quality gates pass
+
+### In Progress
+
+### Completed
+
+### Blocked
+
+## Quality Gates
+
+### Per-Task Gates
+- [ ] Lint passes on changed files
+- [ ] Types check on changed files
+- [ ] Related tests pass
+
+### Full Gates
+$quality_gates
+
+## Exit Criteria
+
+- [ ] All requirements checked off
+- [ ] All quality gates pass
+- [ ] All tasks completed
+- [ ] Code committed with meaningful messages
+
+## Context
+
+### Parent Spec
+$spec_name
+
+### Source Todos
+
+| Priority | Todo File | Issue |
+|----------|-----------|-------|
+[List each todo with its priority and a brief issue description]
+
+### Notes
+
+These fixes originated from ${fix_type_label} review of $spec_name.
+Re-run \`borg review\` after fixes to verify issues are resolved.
+
+## Iteration Log
+
+IMPORTANT RULES:
+1. Order tasks by priority: P1 first, then P2, then P3
+2. Each task should reference its source todo file
+3. Copy acceptance criteria exactly from the todo files
+4. Include file paths from the todo's Findings section
+5. Do not add extra features - only fix the reported issues
+
+Write the SPEC.md file now."
+
+    # Run Claude to do the conversion
+    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print
+
+    # Verify SPEC.md was created
+    if [[ ! -f "$fix_dir/SPEC.md" ]]; then
+        log_error "SPEC.md was not created. Please try again."
+        exit 1
+    fi
+
+    # Create PROMPT.md for fix iterations
+    cat > "$fix_dir/PROMPT.md" << 'FIXPROMPT'
+# Ralph Loop - Fix Iteration
+
+You are in an autonomous implementation loop fixing review findings.
+Each iteration has fresh context. State persists ONLY through files.
+
+---
+
+## Phase 1: Orient
+
+1. Read SPEC.md - your single source of truth
+2. Read the referenced todo files for detailed context
+3. Read AGENTS.md for build/test commands
+
+---
+
+## Phase 2: Select Task
+
+1. If a task is "In Progress" → Continue it
+2. Otherwise → Pick the first "Pending" task
+3. Move task to "In Progress" BEFORE starting work
+
+---
+
+## Phase 3: Fix
+
+1. Read the referenced todo file for full context
+2. Implement the fix described in the todo
+3. The fix should address the specific issue, nothing more
+4. Run validation commands after the fix
+
+---
+
+## Phase 4: Validate
+
+Run quality gates after EVERY fix:
+
+```bash
+bun lint [files-you-changed]
+bun typecheck
+bun test [related-tests]
+```
+
+If validation fails, fix it in the SAME iteration.
+
+---
+
+## Phase 5: Update State
+
+1. Move task to "Completed" with iteration number
+2. Update iteration_count in frontmatter
+3. Add to "Iteration Log"
+
+---
+
+## Phase 6: Commit & Check Exit
+
+1. Commit: `git commit -m "fix: [what]"`
+2. Check ALL exit criteria
+3. If ALL met: output `<loop-complete>All fixes complete.</loop-complete>`
+
+---
+
+## Completion Signal
+
+When complete, output: `<loop-complete>All fixes complete.</loop-complete>`
+FIXPROMPT
+
+    # Create history directory
+    mkdir -p "$fix_dir/.history"
+
+    log_success "Created fix spec from $todo_count todos"
+    echo ""
+    echo "Fix spec: $fix_dir/"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Review the spec: cat $fix_dir/SPEC.md"
+    echo "  2. Implement fixes: borg implement $fix_dir"
+    echo ""
+}
+
+# Legacy alias for backwards compatibility
+cmd_spec_from_todos() {
+    log_warn "spec-from-todos is deprecated. Use 'borg fix' instead."
+    log_info "Converting to new format..."
+    echo ""
+
+    # For backwards compat, create a temporary spec and run fix
+    # This won't work perfectly but gives users guidance
+    log_error "Please use the new workflow:"
+    echo ""
+    echo "  1. Run review on a spec:  borg review specs/my-feature/"
+    echo "  2. Create fix spec:       borg fix code"
+    echo "  3. Implement fixes:       borg implement"
+    echo ""
+    exit 1
+}
+
+#=============================================================================
+# DESIGN COMMAND
+#=============================================================================
+
+detect_dev_server() {
+    # Prioritize port based on detected project type
+    local priority_port=""
+    local ports=()
+
+    # Detect framework and set priority port
+    if ls astro.config.* 2>/dev/null | grep -q .; then
+        priority_port=4321  # Astro default
+    elif ls next.config.* 2>/dev/null | grep -q .; then
+        priority_port=3000  # Next.js default
+    elif ls vite.config.* 2>/dev/null | grep -q .; then
+        priority_port=5173  # Vite default
+    elif ls nuxt.config.* 2>/dev/null | grep -q .; then
+        priority_port=3000  # Nuxt default
+    elif [[ -f "svelte.config.js" ]]; then
+        priority_port=5173  # SvelteKit default
+    elif [[ -f "angular.json" ]]; then
+        priority_port=4200  # Angular default
+    elif [[ -f "bin/rails" ]]; then
+        priority_port=3000  # Rails default
+    fi
+
+    # Build port list with priority port first
+    if [[ -n "$priority_port" ]]; then
+        ports=("$priority_port")
+    fi
+    # Add remaining common ports
+    for p in 4321 5173 5174 3000 8080 8000 4000 4200; do
+        if [[ "$p" != "$priority_port" ]]; then
+            ports+=("$p")
+        fi
+    done
+
+    for port in "${ports[@]}"; do
+        if curl -s --connect-timeout 1 "http://localhost:$port" > /dev/null 2>&1; then
+            echo "http://localhost:$port"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+cmd_design() {
+    local url="${1:-}"
+    local iterations="${2:-5}"
+
+    log_step "Design Improvement Loop"
+
+    # Auto-detect dev server if no URL provided
+    if [[ -z "$url" ]]; then
+        log_info "No URL provided, detecting dev server..."
+        url=$(detect_dev_server)
+        if [[ -z "$url" ]]; then
+            log_error "No dev server detected. Start your dev server or provide a URL:"
+            log_error "  borg design http://localhost:3000"
+            log_error "  borg design http://localhost:5173 10"
+            exit 1
+        fi
+        log_success "Found dev server at $url"
+    fi
+
+    # Validate URL is reachable
+    if ! curl -s --connect-timeout 3 "$url" > /dev/null 2>&1; then
+        log_error "Cannot reach $url - is your dev server running?"
+        exit 1
+    fi
+
+    echo ""
+    echo "URL:        $url"
+    echo "Iterations: $iterations"
+    echo ""
+    echo "This will:"
+    echo "  1. Take screenshots of current UI"
+    echo "  2. Apply /frontend-design skill for distinctive design"
+    echo "  3. Iterate $iterations times to refine"
+    echo ""
+    echo "Press Ctrl+C to stop at any time."
+    echo ""
+
+    # Create design history directory
+    local design_dir="design-iterations"
+    mkdir -p "$design_dir"
+    local timestamp
+    timestamp=$(date '+%Y%m%d-%H%M%S')
+    local session_dir="$design_dir/$timestamp"
+    mkdir -p "$session_dir"
+
+    log_info "Design session: $session_dir"
+    echo ""
+
+    local iteration=0
+
+    while [[ $iteration -lt $iterations ]]; do
+        iteration=$((iteration + 1))
+        local iter_timestamp
+        iter_timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+        echo ""
+        echo -e "${CYAN}${BOLD}=== Design Iteration $iteration/$iterations ($iter_timestamp) ===${NC}"
+        echo ""
+
+        # Log file for this iteration
+        local log_file="$session_dir/$(printf '%02d' $iteration)-design.md"
+
+        # Create the design prompt
+        local design_prompt="You are in iteration $iteration of a design improvement loop.
+
+TARGET URL: $url
+
+INSTRUCTIONS:
+1. First, take a screenshot of the current state:
+   Use agent-browser to screenshot $url
+
+2. Analyze the current design:
+   - Is it bland, generic, or 'AI-looking'?
+   - What specific elements need improvement?
+   - What's the overall visual hierarchy?
+
+3. Apply the /frontend-design skill philosophy:
+   - Create DISTINCTIVE design, not generic templates
+   - Use bold, intentional choices (not safe defaults)
+   - Consider: typography, color, spacing, visual rhythm
+   - Add personality and craft
+
+4. Make improvements to the code:
+   - Focus on CSS/styling changes
+   - Improve one section or component per iteration
+   - Run any build/dev commands if needed
+
+5. Take an 'after' screenshot to verify improvement
+
+6. If design is now polished and distinctive (not bland):
+   Output: <design-complete>Design polished.</design-complete>
+
+IMPORTANT:
+- Each iteration should make VISIBLE improvement
+- Don't just add subtle tweaks - make bold changes
+- The goal is distinctive, memorable design
+- Avoid: gray backgrounds, generic shadows, safe color choices
+- Embrace: bold typography, intentional whitespace, personality
+
+Start by taking a screenshot of $url"
+
+        # Initialize log file
+        {
+            echo "# Design Iteration $iteration"
+            echo "Started: $iter_timestamp"
+            echo "URL: $url"
+            echo ""
+            echo "## Output"
+            echo ""
+        } > "$log_file"
+
+        # Run the design iteration
+        if ! run_claude_with_retry "$design_prompt" "$log_file"; then
+            log_warn "Iteration $iteration had issues. Continuing..."
+            sleep 2
+            continue
+        fi
+
+        # Check for completion signal
+        if grep -qE "<design-complete>" "$log_file"; then
+            echo ""
+            log_success "Design polished after $iteration iterations!"
+            echo ""
+            echo "Screenshots saved in: $session_dir/"
+            echo ""
+            echo "Next steps:"
+            echo "  1. Review the changes: git diff"
+            echo "  2. Run code review: borg review"
+            echo "  3. Commit if satisfied: git add -A && git commit -m 'style: polish UI design'"
+            echo ""
+            exit 0
+        fi
+
+        # Brief pause between iterations
+        log_info "Pausing before next iteration..."
+        sleep 3
+    done
+
+    echo ""
+    log_warn "Completed $iterations design iterations."
+    echo ""
+    echo "The design may need more work. Options:"
+    echo "  1. Run more iterations: borg design $url 5"
+    echo "  2. Review changes: git diff"
+    echo "  3. Run code review: borg review --design"
+    echo ""
+}
+
+#=============================================================================
+# STATUS COMMAND
+#=============================================================================
+
+cmd_status() {
+    log_step "Ralph Borg Status"
+
+    if [[ ! -d "$SPECS_DIR" ]]; then
+        log_warn "No specs directory found. Run 'borg init' first."
+        exit 0
+    fi
+
+    local specs_found=0
+
+    echo "Spec                          Status      Iterations  Tasks"
+    echo "----                          ------      ----------  -----"
+
+    for spec_file in "$SPECS_DIR"/*/SPEC.md; do
+        [[ -f "$spec_file" ]] || continue
+        specs_found=$((specs_found + 1))
+
+        local spec_dir
+        spec_dir=$(dirname "$spec_file")
+        local spec_name
+        spec_name=$(basename "$spec_dir")
+
+        # Extract metadata
+        local status iteration_count
+        status=$(grep "^status:" "$spec_file" | cut -d: -f2 | tr -d ' ' || echo "unknown")
+        iteration_count=$(grep "^iteration_count:" "$spec_file" | cut -d: -f2 | tr -d ' ' || echo "0")
+
+        # Count tasks
+        local pending completed
+        pending=$(grep -c "^\- \[ \]" "$spec_file" 2>/dev/null || true)
+        completed=$(grep -c "^\- \[x\]" "$spec_file" 2>/dev/null || true)
+        # Default to 0 if empty
+        pending=${pending:-0}
+        completed=${completed:-0}
+
+        # Color-code status
+        local status_display
+        case "$status" in
+            complete)  status_display="${GREEN}$status${NC}" ;;
+            building)  status_display="${YELLOW}$status${NC}" ;;
+            blocked)   status_display="${RED}$status${NC}" ;;
+            *)         status_display="$status" ;;
+        esac
+
+        printf "%-30s %-18b %-12s %s/%s\n" "$spec_name" "$status_display" "$iteration_count" "$completed" "$((completed + pending))"
+    done
+
+    if [[ $specs_found -eq 0 ]]; then
+        echo "(no specs found)"
+    fi
+
+    echo ""
+}
+
+#=============================================================================
+# LEARNINGS COMMAND
+#=============================================================================
+
+cmd_learnings() {
+    local category="${1:-}"
+    local limit="${2:-20}"
+
+    log_step "Project Learnings"
+
+    if [[ ! -f ".borg/learnings.json" ]]; then
+        log_warn "No learnings found. Run 'borg implement' to generate learnings."
+        exit 0
+    fi
+
+    if [[ -n "$category" ]]; then
+        echo "Category: $category (last $limit)"
+        echo "---"
+        get_learnings_summary "$category" "$limit"
+    else
+        echo "All categories (last $limit)"
+        echo "---"
+        get_learnings_summary "" "$limit"
+    fi
+
+    echo ""
+    echo "Categories: environment, pattern, gotcha, fix, discovery, iteration_failure"
+    echo "Usage: borg learnings [category] [limit]"
+}
+
+#=============================================================================
+# HELP COMMAND
+#=============================================================================
+
+cmd_help() {
+    cat << HELP
+Ralph Borg - Autonomous Feature Implementation System
+Version: $BORG_VERSION
+
+Combines compound-engineering's rich planning with the Ralph Loop technique
+for autonomous, iterative feature implementation.
+
+USAGE:
+    borg <command> [arguments]
+
+COMMANDS:
+    init [path]         Initialize a project for Ralph Borg
+                        Creates specs/, plans/, AGENTS.md
+                        Auto-detects project type (bun, npm, rails, python, etc.)
+
+    plan <description>  Create and deepen a feature plan
+                        Runs /workflows:plan + /deepen-plan
+                        Enriches with 40+ parallel research agents
+
+    spec <plan-file>    Convert a plan to SPEC.md format
+                        Creates specs/<feature>/ directory
+                        Generates SPEC.md + PROMPT.md
+                        Auto-detects quality gates
+
+    implement [spec]    Start autonomous implementation loop
+                        Reads SPEC.md, executes one task per iteration
+                        Runs backpressure (tests, lint) each iteration
+                        Auto-detects fix specs (fixes/code, fixes/design)
+                        Continues until completion or max iterations
+
+    review [spec]       Run comprehensive code review (spec-aware)
+        [--design]      Include design review (requires dev server)
+        [--design-only] Only run design review
+        [--url URL]     Specify dev server URL for design review
+                        Saves todos to: specs/<feature>/todos/code/
+                                    or: specs/<feature>/todos/design/
+
+    fix [type] [spec]   Convert todos to fix spec (spec-aware)
+        [code]          Fix code review issues only
+        [design]        Fix design review issues only
+        (no arg)        Fix all issues
+                        Creates: specs/<feature>/fixes/[code|design]/
+
+    design [url]        Proactive design improvement loop
+        [iterations]    Number of iterations (default: 5)
+                        Auto-detects dev server if no URL
+                        Uses /frontend-design skill for distinctive UI
+                        Saves screenshots to design-iterations/
+
+    status              Show progress of all specs (including fixes)
+
+    learnings [cat]     View project learnings from .borg/learnings.json
+        [limit]         Number of entries to show (default: 20)
+                        Categories: environment, pattern, gotcha, fix, discovery
+
+    help                Show this help
+
+SPEC STRUCTURE (after review):
+    specs/my-feature/
+    ├── SPEC.md                 # Original feature spec
+    ├── PROMPT.md
+    ├── todos/
+    │   ├── code/               # Code review findings
+    │   │   └── 001-p1-issue.md
+    │   └── design/             # Design review findings
+    │       └── 001-p2-issue.md
+    └── fixes/
+        ├── code/               # Fix spec for code issues
+        │   └── SPEC.md
+        └── design/             # Fix spec for design issues
+            └── SPEC.md
+
+WORKFLOW:
+    1. borg init                           # Initialize project
+    2. borg plan "add user auth"           # Create rich plan
+    3. borg spec plans/add-user-auth.md    # Convert to spec
+    4. borg implement                      # Build feature
+    5. borg design                         # Polish UI (optional)
+    6. borg review                         # Code review → todos/code/
+    7. borg review --design                # Design review → todos/design/
+    8. borg fix code                       # Create fix spec for code
+    9. borg implement                      # Fix code issues
+   10. borg fix design                     # Create fix spec for design
+   11. borg implement                      # Fix design issues
+   12. borg review                         # Verify clean
+
+ENVIRONMENT VARIABLES:
+    MAX_ITERATIONS      Maximum loop iterations (default: 50)
+    ITERATION_DELAY     Seconds between iterations (default: 3)
+    MAX_RETRIES         Retries per iteration on transient errors (default: 3)
+    RETRY_DELAY         Initial retry delay in seconds, doubles each retry (default: 5)
+    ITERATION_TIMEOUT   Max seconds per iteration before timeout (default: 600)
+    MAX_CONSECUTIVE_FAILURES  Stop after N consecutive failures (default: 3)
+
+RESILIENCE:
+    - Per-iteration timeout prevents stuck iterations
+    - Visible retry logging shows progress during failures
+    - Consecutive failure limit prevents infinite loops
+    - Graceful Ctrl+C handling for clean exits
+    - Auto-resume: just run 'borg implement' again
+
+PHILOSOPHY:
+    Planning is human-guided and rich.
+    Implementation is autonomous and focused.
+    Each iteration: fresh context + file-based state.
+    Backpressure (tests, lint) lets agents self-correct.
+
+SOURCES:
+    https://ghuntley.com/ralph/
+    https://ghuntley.com/pressure/
+    https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum
+
+HELP
+}
+
+#=============================================================================
+# MAIN
+#=============================================================================
+
+main() {
+    check_prerequisites
+
+    local command="${1:-help}"
+    shift || true
+
+    case "$command" in
+        init)
+            cmd_init "$@"
+            ;;
+        plan)
+            cmd_plan "$@"
+            ;;
+        spec)
+            cmd_spec "$@"
+            ;;
+        implement|build|run)
+            cmd_implement "$@"
+            ;;
+        review)
+            cmd_review "$@"
+            ;;
+        design)
+            cmd_design "$@"
+            ;;
+        fix)
+            cmd_fix "$@"
+            ;;
+        spec-from-todos)
+            # Deprecated - show migration message
+            cmd_spec_from_todos "$@"
+            ;;
+        status)
+            cmd_status
+            ;;
+        learnings)
+            cmd_learnings "$@"
+            ;;
+        help|--help|-h)
+            cmd_help
+            ;;
+        version|--version|-v)
+            echo "Ralph Borg v$BORG_VERSION"
+            ;;
+        *)
+            log_error "Unknown command: $command"
+            echo "Run 'borg help' for usage."
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
