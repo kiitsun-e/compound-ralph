@@ -2577,45 +2577,79 @@ TARGET URL: $design_url
 SPEC FILE: $abs_spec_dir/SPEC.md
 
 INSTRUCTIONS:
-1. Take a screenshot of $design_url using agent-browser
+1. First, load the /frontend-design skill to apply its philosophy:
+   Use: skill: frontend-design
 
-2. Analyze the design critically for these issues:
-   - Bland/generic appearance (looks like every other AI-generated site)
-   - Poor typography choices (default fonts, inconsistent sizing)
-   - Weak color palette (too much gray, no personality)
-   - Bad spacing/rhythm (cramped or overly sparse)
-   - Missing visual hierarchy
-   - Generic components (default buttons, inputs)
-   - Lack of personality or brand identity
+2. Take a screenshot of $design_url using agent-browser
 
-3. For each issue found, create a todo file in:
+3. Apply the /frontend-design skill philosophy to critique the design:
+
+   DISTINCTIVE vs GENERIC - Ask yourself:
+   - Does this look like every other AI-generated site? (Bad)
+   - Would a human designer be proud of this? (Good)
+   - Is there a clear point of view? (Good)
+   - Could this be any company's website? (Bad)
+
+   TYPOGRAPHY - Check for:
+   - Default system fonts vs intentional font choices
+   - Weak hierarchy (everything same size/weight)
+   - Poor line-height and letter-spacing
+   - Missing typographic rhythm
+
+   COLOR - Look for:
+   - Too much gray (the #1 sign of AI-generated design)
+   - Safe, boring palette with no personality
+   - Poor contrast or muddy colors
+   - No accent color or visual interest
+
+   SPACING & LAYOUT - Evaluate:
+   - Cramped or inconsistent spacing
+   - No visual rhythm or intentional whitespace
+   - Generic grid without personality
+   - Components feel disconnected
+
+   COMPONENTS - Identify:
+   - Default/unstyled buttons, inputs, cards
+   - No hover states or micro-interactions
+   - Generic shadows and borders
+   - Missing polish and craft
+
+   PERSONALITY - Consider:
+   - Does the design have a point of view?
+   - Is there craft and attention to detail?
+   - Would this stand out or blend in?
+
+4. For each issue found, create a todo file in:
    $design_todos_dir/
 
    Name files like: 001-p2-bland-hero.md, 002-p2-weak-typography.md
 
-4. Use this format:
+5. Use this format:
 ---
 priority: p2
-tags: [design, ui]
+tags: [design, ui, frontend-design]
 spec: $spec_name
 type: design
 ---
 # [Issue Title]
 
 ## Problem Statement
-[What's wrong with the current design]
+[What's wrong - reference specific /frontend-design principles violated]
 
 ## Findings
 - File: \`path/to/component.tsx\`
 - Screenshot: [describe what you see]
+- Principle violated: [e.g., 'Generic color palette with too much gray']
 
 ## Recommended Action
-[Specific design improvement]
+[Specific design improvement following /frontend-design philosophy]
+[Include concrete suggestions: specific colors, font sizes, spacing values]
 
 ## Acceptance Criteria
-- [ ] [Specific visual outcome]
+- [ ] [Specific visual outcome that would satisfy /frontend-design standards]
 
-Focus on actionable, specific issues - not vague feedback like 'make it prettier'."
+IMPORTANT: Be opinionated. The /frontend-design skill demands distinctive, memorable design.
+Don't accept 'good enough' - push for design that has craft and personality."
 
             echo "$design_review_prompt" | claude --dangerously-skip-permissions --print
             echo ""
