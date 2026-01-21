@@ -144,10 +144,10 @@ prune_context() {
 ```
 
 **Success criteria:**
-- [ ] Context file created on `borg init`
-- [ ] Context injected into PROMPT.md
-- [ ] Learnings added after successful iterations
-- [ ] Context stays under 100 entries total
+- [x] Context file created on `borg init`
+- [x] Context injected into PROMPT.md
+- [x] Learnings added after successful iterations
+- [x] Context stays under 100 entries total
 
 ---
 
@@ -267,10 +267,10 @@ record_successful_fix() {
 ```
 
 **Success criteria:**
-- [ ] Lint errors auto-fixed on retry
-- [ ] Test failures retried with error context
-- [ ] Unfixable errors stop immediately
-- [ ] Successful fixes recorded in context
+- [x] Lint errors auto-fixed on retry
+- [x] Test failures retried with error context
+- [x] Unfixable errors stop immediately
+- [x] Successful fixes recorded in context
 
 ---
 
@@ -389,10 +389,10 @@ Before writing ANY new code:
 ```
 
 **Success criteria:**
-- [ ] All 6 supported stacks have quality commands discovered
-- [ ] Gates run after each task completion
-- [ ] "Search before write" instruction in every PROMPT
-- [ ] Gates failure triggers self-healing retry
+- [x] All 6 supported stacks have quality commands discovered
+- [x] Gates run after each task completion
+- [x] "Search before write" instruction in every PROMPT
+- [x] Gates failure triggers self-healing retry
 
 ---
 
@@ -409,12 +409,12 @@ Before writing ANY new code:
 
 ## Acceptance Criteria
 
-- [ ] Fresh Claude instance continues work using context from previous runs
-- [ ] Lint/test failures retry with error in prompt (up to 3 times)
-- [ ] Unfixable errors stop immediately with clear message
-- [ ] Successful fixes are recorded and reused
-- [ ] All stacks (JS, TS, Ruby, Python, Go, Rust) have quality gates
-- [ ] "Search before write" instruction in every PROMPT
+- [x] Fresh Claude instance continues work using context from previous runs
+- [x] Lint/test failures retry with error in prompt (up to 3 times)
+- [x] Unfixable errors stop immediately with clear message
+- [x] Successful fixes are recorded and reused
+- [x] All stacks (JS, TS, Ruby, Python, Go, Rust) have quality gates
+- [x] "Search before write" instruction in every PROMPT
 
 ---
 

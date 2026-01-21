@@ -5,10 +5,13 @@ Your state persists through these files (all in repo):
 - `SPEC.md` - Tasks, requirements, notes
 - `.borg/project.json` - Discovered commands and config
 - `.borg/learnings.json` - Learnings from previous iterations
+- `.borg/context.yaml` - Accumulated context (learnings, error fixes, patterns)
 - `git commits` - Code changes
 
 **This loop handles EVERYTHING:** empty repos, existing projects, any tech stack.
 You discover what exists, create what's missing, and verify it actually works.
+
+{{ACCUMULATED_CONTEXT}}
 
 ---
 
@@ -205,29 +208,45 @@ Now that the environment works, understand the current state:
 
 ---
 
-## Phase 4: Investigate (DON'T ASSUME)
+## Phase 4: Investigate (MANDATORY - SEARCH BEFORE WRITE)
 
-Before writing ANY code:
+**HARD RULE:** Before writing ANY new code, you MUST search the codebase first.
 
 ### 4.1 Search for existing implementations
 
 ```bash
-# Search for related code
-grep -r "relevant_term" src/ lib/ app/ --include="*.ts" --include="*.js" --include="*.rb" --include="*.py"
+# Search for related code (use ripgrep if available, fallback to grep)
+rg "function_name\|class_name\|relevant_term" src/ lib/ app/ 2>/dev/null || \
+  grep -r "relevant_term" src/ lib/ app/ --include="*.ts" --include="*.js" --include="*.rb" --include="*.py"
+
+# Check common utility/shared locations
+ls -la src/utils/ src/lib/ src/shared/ lib/ app/services/ 2>/dev/null
 
 # Search for similar patterns
-find . -name "*relevant*" -type f
+find . -name "*relevant*" -type f -not -path "*/node_modules/*" -not -path "*/.git/*"
 ```
 
-### 4.2 Check if partially done
+### 4.2 If existing code found:
+- **Import and use it** - Don't duplicate functionality
+- **Extend if needed** - Add to existing rather than creating new
+- **Document in Notes** - Explain what you found and why you're reusing/extending
+
+### 4.3 If code NOT found:
+- Proceed with implementation
+- Consider adding to shared location if reusable by other features
+- Follow existing patterns discovered in the codebase
+
+### 4.4 Check if partially done
 
 - Was this started in a previous iteration?
-- Is there existing code that does something similar?
 - Are there TODOs or FIXMEs related to this task?
+- Check git log for recent related commits
 
-### 4.3 Document findings
+### 4.5 Document findings
 
 Update Notes section with what you found before proceeding.
+
+**DO NOT skip this phase. The codebase may already have what you need.**
 
 ---
 

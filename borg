@@ -599,6 +599,402 @@ get_learnings_summary() {
     fi
 }
 
+#=============================================================================
+# CONTEXT PRESERVATION (Learnings persist across fresh Claude instances)
+#=============================================================================
+
+CONTEXT_FILE=".borg/context.yaml"
+CONTEXT_MAX_LEARNINGS=50
+CONTEXT_MAX_ERRORS=20
+CONTEXT_MAX_PATTERNS=30
+
+# Initialize context file if it doesn't exist
+init_context() {
+    mkdir -p .borg
+    if [[ ! -f "$CONTEXT_FILE" ]]; then
+        cat > "$CONTEXT_FILE" << 'EOF'
+# Ralph-borg accumulated context
+# This file persists across iterations and fresh Claude instances
+
+learnings: []
+errors_fixed: []
+patterns_discovered: []
+EOF
+        log_info "Created context file: $CONTEXT_FILE"
+    fi
+}
+
+# Add a learning to context.yaml
+# Usage: add_context_learning "learning text"
+add_context_learning() {
+    local learning="$1"
+    init_context
+
+    if command -v yq &>/dev/null; then
+        yq -i ".learnings += [\"$learning\"]" "$CONTEXT_FILE"
+    else
+        # Fallback: append manually (less clean but works without yq)
+        sed -i '' 's/^learnings: \[\]/learnings:\n  - "'"$learning"'"/' "$CONTEXT_FILE" 2>/dev/null || \
+        echo "  - \"$learning\"" >> "$CONTEXT_FILE"
+    fi
+}
+
+# Add an error fix to context.yaml
+# Usage: add_context_error_fix "error pattern" "fix description"
+add_context_error_fix() {
+    local error="$1"
+    local fix="$2"
+    init_context
+
+    if command -v yq &>/dev/null; then
+        yq -i ".errors_fixed += [{\"error\": \"$error\", \"fix\": \"$fix\"}]" "$CONTEXT_FILE"
+    else
+        # Fallback: append manually
+        echo "  - error: \"$error\"" >> "$CONTEXT_FILE"
+        echo "    fix: \"$fix\"" >> "$CONTEXT_FILE"
+    fi
+}
+
+# Add a discovered pattern to context.yaml
+# Usage: add_context_pattern "pattern description"
+add_context_pattern() {
+    local pattern="$1"
+    init_context
+
+    if command -v yq &>/dev/null; then
+        yq -i ".patterns_discovered += [\"$pattern\"]" "$CONTEXT_FILE"
+    else
+        # Fallback: append manually
+        echo "  - \"$pattern\"" >> "$CONTEXT_FILE"
+    fi
+}
+
+# Prune context to keep it bounded
+prune_context() {
+    [[ ! -f "$CONTEXT_FILE" ]] && return
+
+    if command -v yq &>/dev/null; then
+        # Keep only most recent entries
+        yq -i ".learnings = .learnings | .[-$CONTEXT_MAX_LEARNINGS:]" "$CONTEXT_FILE" 2>/dev/null || true
+        yq -i ".errors_fixed = .errors_fixed | .[-$CONTEXT_MAX_ERRORS:]" "$CONTEXT_FILE" 2>/dev/null || true
+        yq -i ".patterns_discovered = .patterns_discovered | .[-$CONTEXT_MAX_PATTERNS:]" "$CONTEXT_FILE" 2>/dev/null || true
+    fi
+}
+
+# Get context for injection into prompts
+# Returns formatted context string
+get_context_for_prompt() {
+    [[ ! -f "$CONTEXT_FILE" ]] && return
+
+    local learnings=""
+    local errors=""
+    local patterns=""
+
+    if command -v yq &>/dev/null; then
+        learnings=$(yq -r '.learnings // [] | map("- " + .) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
+        errors=$(yq -r '.errors_fixed // [] | map("- " + .error + " → Fix: " + .fix) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
+        patterns=$(yq -r '.patterns_discovered // [] | map("- " + .) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
+    fi
+
+    cat << EOF
+## Accumulated Context (from previous iterations)
+
+### Learnings
+${learnings:-None yet}
+
+### Errors You've Fixed Before (Don't Repeat)
+${errors:-None yet}
+
+### Patterns Discovered in This Codebase
+${patterns:-None yet}
+EOF
+}
+
+#=============================================================================
+# SELF-HEALING (Automatic retry with error context)
+#=============================================================================
+
+MAX_SELF_HEAL_ATTEMPTS="${MAX_SELF_HEAL_ATTEMPTS:-3}"
+
+# Check if an error is unfixable (requires human intervention)
+is_unfixable_error() {
+    local error="$1"
+
+    # These errors require human intervention
+    local unfixable_patterns=(
+        "API key"
+        "api key"
+        "authentication failed"
+        "Authentication failed"
+        "permission denied"
+        "Permission denied"
+        "disk full"
+        "out of memory"
+        "rate limit exceeded"
+        "Rate limit"
+        "SIGKILL"
+        "ENOMEM"
+        "ENOSPC"
+        "Unable to connect to Claude"
+        "network error"
+        "Network error"
+    )
+
+    for pattern in "${unfixable_patterns[@]}"; do
+        if [[ "$error" == *"$pattern"* ]]; then
+            return 0  # Is unfixable
+        fi
+    done
+
+    return 1  # Is fixable (or at least worth trying)
+}
+
+# Add error context to prompt for self-healing
+add_error_to_prompt() {
+    local spec_dir="$1"
+    local error="$2"
+    local prompt_file="$spec_dir/PROMPT.md"
+
+    # Truncate error if too long (keep first 2000 chars)
+    if [[ ${#error} -gt 2000 ]]; then
+        error="${error:0:2000}... [truncated]"
+    fi
+
+    # Escape special characters for safe insertion
+    local escaped_error
+    escaped_error=$(printf '%s' "$error" | sed 's/[&/\]/\\&/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+
+    # Append error context to prompt
+    cat >> "$prompt_file" << EOF
+
+---
+
+## SELF-HEALING CONTEXT
+
+The previous iteration failed with this error:
+
+\`\`\`
+$error
+\`\`\`
+
+Please:
+1. Analyze what went wrong
+2. Fix the issue (check for typos, missing imports, incorrect paths)
+3. Re-run validation to confirm the fix
+4. Continue with the current task
+
+**Do NOT** output \`<loop-complete>\` until the issue is actually fixed.
+
+EOF
+
+    log_info "Added self-healing context to prompt"
+}
+
+# Record a successful fix for future learning
+record_successful_fix() {
+    local error="$1"
+    local fix_description="$2"
+
+    # Add to context.yaml for cross-session learning
+    add_context_error_fix "$error" "$fix_description"
+
+    # Also add to learnings.json for current session
+    add_learning "fix" "Fixed: $error → $fix_description" "" "" ""
+
+    log_success "Learned fix: $error → $fix_description"
+}
+
+# Record a blocked iteration
+record_blocked_iteration() {
+    local spec_dir="$1"
+    local error="$2"
+    local spec_file="$spec_dir/SPEC.md"
+
+    log_error "Iteration blocked due to unfixable error"
+
+    # Add blocked note to SPEC.md
+    {
+        echo ""
+        echo "### Blocked (Auto-added $(date -Iseconds))"
+        echo "Error: ${error:0:500}"
+        echo ""
+    } >> "$spec_file"
+
+    # Record as learning
+    add_learning "iteration_failure" "Blocked: ${error:0:200}" "" "$(basename "$spec_dir")" ""
+}
+
+#=============================================================================
+# UNIVERSAL QUALITY GATES (Stack-agnostic quality checks)
+#=============================================================================
+
+# Discover quality commands for any supported stack
+# Returns commands one per line
+discover_quality_commands() {
+    local project_type="${1:-}"
+    local quality_commands=()
+
+    # Auto-detect project type if not provided
+    if [[ -z "$project_type" ]]; then
+        project_type=$(detect_project_type)
+    fi
+
+    case "$project_type" in
+        bun)
+            # Bun-specific checks
+            if [[ -f "package.json" ]]; then
+                [[ -n "$(jq -r '.scripts.test // empty' package.json 2>/dev/null)" ]] && \
+                    quality_commands+=("bun test --run")
+                [[ -n "$(jq -r '.scripts.lint // empty' package.json 2>/dev/null)" ]] && \
+                    quality_commands+=("bun run lint")
+                [[ -n "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && \
+                    quality_commands+=("bun run typecheck")
+                # Fallback to tsc if no typecheck script but tsconfig exists
+                if [[ -z "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && [[ -f "tsconfig.json" ]]; then
+                    quality_commands+=("bunx tsc --noEmit")
+                fi
+            fi
+            ;;
+
+        npm|yarn|pnpm)
+            local runner="npm run"
+            [[ "$project_type" == "yarn" ]] && runner="yarn"
+            [[ "$project_type" == "pnpm" ]] && runner="pnpm run"
+
+            if [[ -f "package.json" ]]; then
+                [[ -n "$(jq -r '.scripts.test // empty' package.json 2>/dev/null)" ]] && \
+                    quality_commands+=("CI=true $runner test")
+                [[ -n "$(jq -r '.scripts.lint // empty' package.json 2>/dev/null)" ]] && \
+                    quality_commands+=("$runner lint")
+                [[ -n "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && \
+                    quality_commands+=("$runner typecheck")
+                # Fallback to tsc if no typecheck script but tsconfig exists
+                if [[ -z "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && [[ -f "tsconfig.json" ]]; then
+                    quality_commands+=("npx tsc --noEmit")
+                fi
+            fi
+            ;;
+
+        rails)
+            # Rails/Ruby checks
+            [[ -f "bin/rails" ]] && quality_commands+=("bin/rails test")
+            [[ -f ".rubocop.yml" ]] && quality_commands+=("bundle exec rubocop --parallel")
+            # Security scan if brakeman is available
+            if [[ -f "Gemfile" ]] && grep -q "brakeman" Gemfile 2>/dev/null; then
+                quality_commands+=("bundle exec brakeman -q --no-pager")
+            fi
+            # Bundle audit for security
+            if [[ -f "Gemfile" ]] && grep -q "bundler-audit" Gemfile 2>/dev/null; then
+                quality_commands+=("bundle exec bundle-audit check --update")
+            fi
+            ;;
+
+        python)
+            # Python checks
+            if [[ -f "pytest.ini" ]] || [[ -f "pyproject.toml" ]] || [[ -d "tests" ]]; then
+                quality_commands+=("pytest")
+            fi
+            # Ruff for linting (fast, modern)
+            if [[ -f "pyproject.toml" ]] && grep -q "ruff" pyproject.toml 2>/dev/null; then
+                quality_commands+=("ruff check .")
+            elif [[ -f "ruff.toml" ]]; then
+                quality_commands+=("ruff check .")
+            fi
+            # Type checking with mypy or pyright
+            if [[ -f "pyproject.toml" ]] && grep -q "mypy" pyproject.toml 2>/dev/null; then
+                quality_commands+=("mypy .")
+            elif [[ -f "mypy.ini" ]]; then
+                quality_commands+=("mypy .")
+            fi
+            # Security with bandit
+            if command -v bandit &>/dev/null; then
+                quality_commands+=("bandit -r . -q")
+            fi
+            ;;
+
+        go)
+            # Go checks
+            quality_commands+=("go test ./...")
+            quality_commands+=("go vet ./...")
+            # golangci-lint for comprehensive linting
+            if command -v golangci-lint &>/dev/null; then
+                quality_commands+=("golangci-lint run")
+            fi
+            # Security with gosec
+            if command -v gosec &>/dev/null; then
+                quality_commands+=("gosec -quiet ./...")
+            fi
+            ;;
+
+        rust)
+            # Rust checks
+            quality_commands+=("cargo test")
+            quality_commands+=("cargo clippy -- -D warnings")
+            # Security audit
+            if command -v cargo-audit &>/dev/null; then
+                quality_commands+=("cargo audit")
+            fi
+            ;;
+
+        *)
+            # Unknown project type - try common commands
+            if [[ -f "package.json" ]]; then
+                quality_commands+=("npm test 2>/dev/null || true")
+            fi
+            ;;
+    esac
+
+    # Output commands one per line
+    printf '%s\n' "${quality_commands[@]}"
+}
+
+# Run all quality gates for the project
+# Returns 0 if all pass, 1 if any fail
+run_quality_gates() {
+    local project_type="${1:-}"
+    local failed=0
+    local gate_output=""
+
+    # Auto-detect project type if not provided
+    if [[ -z "$project_type" ]]; then
+        project_type=$(detect_project_type)
+    fi
+
+    log_step "Running Quality Gates ($project_type)"
+
+    while IFS= read -r cmd; do
+        [[ -z "$cmd" ]] && continue
+
+        log_info "Gate: $cmd"
+
+        # Run command and capture output
+        set +e
+        gate_output=$(eval "$cmd" 2>&1)
+        local exit_code=$?
+        set -e
+
+        if [[ $exit_code -ne 0 ]]; then
+            log_error "Gate FAILED: $cmd"
+            echo "$gate_output" | tail -20
+            failed=1
+        else
+            log_success "Gate passed: $cmd"
+        fi
+    done < <(discover_quality_commands "$project_type")
+
+    if [[ $failed -eq 0 ]]; then
+        log_success "All quality gates passed"
+    else
+        log_error "Some quality gates failed"
+    fi
+
+    return $failed
+}
+
+#=============================================================================
+# INTEGRATION VERIFICATION
+#=============================================================================
+
 # Verify integration - ensure everything actually works
 # Discovery-based: reads commands from .borg/project.json
 # Returns 0 if all checks pass, 1 if any fail
@@ -1055,6 +1451,14 @@ cmd_init() {
         cp -n "$BORG_DIR/templates/SPEC-template.md" "$project_path/$SPECS_DIR/" 2>/dev/null || true
         log_success "Copied SPEC template to specs/"
     fi
+
+    # Initialize context file for cross-session learning
+    (cd "$project_path" && init_context)
+    log_success "Initialized .borg/context.yaml for context preservation"
+
+    # Discover project configuration
+    (cd "$project_path" && discover_project)
+    log_success "Discovered project configuration"
 
     # Create .gitignore additions if needed
     if [[ -f "$project_path/.gitignore" ]]; then
@@ -1618,10 +2022,15 @@ cmd_implement() {
     # Update status to building
     sed -i '' 's/status: pending/status: building/' "$spec_file" 2>/dev/null || true
 
+    # Initialize and prune context to keep it bounded
+    init_context
+    prune_context
+
     log_step "Starting Ralph Borg Loop"
     echo "Spec:           $spec_file"
     echo "Max iterations: $MAX_ITERATIONS"
     echo "Delay:          ${ITERATION_DELAY}s between iterations"
+    echo "Context:        $CONTEXT_FILE"
     echo ""
     echo "Press Ctrl+C to stop at any time."
     echo ""
@@ -1706,6 +2115,17 @@ $recent_learnings"
             fi
         fi
 
+        # Get accumulated context from context.yaml (persists across sessions)
+        local accumulated_context=""
+        if [[ -f "$CONTEXT_FILE" ]]; then
+            accumulated_context=$(get_context_for_prompt 2>/dev/null || true)
+            if [[ -n "$accumulated_context" ]]; then
+                accumulated_context="
+
+$accumulated_context"
+            fi
+        fi
+
         # Create the iteration prompt
         local iteration_prompt="You are in iteration $iteration of a Ralph Borg implementation loop.
 
@@ -1715,7 +2135,7 @@ CRITICAL INSTRUCTIONS:
 3. Follow the phases in PROMPT.md exactly
 4. Complete ONE task, run quality checks, update SPEC.md
 5. If ALL exit criteria are met, output <loop-complete>Feature complete</loop-complete>
-$issues_context$learnings_context
+$issues_context$learnings_context$accumulated_context
 
 Start by reading both files now."
 
