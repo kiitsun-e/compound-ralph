@@ -251,7 +251,7 @@ detect_project_type() {
     local project_path="${1:-.}"
 
     if [[ -f "$project_path/package.json" ]]; then
-        if grep -q '"bun"' "$project_path/package.json" 2>/dev/null || [[ -f "$project_path/bun.lockb" ]]; then
+        if grep -q '"bun"' "$project_path/package.json" 2>/dev/null || [[ -f "$project_path/bun.lockb" ]] || [[ -f "$project_path/bun.lock" ]]; then
             echo "bun"
         elif [[ -f "$project_path/yarn.lock" ]]; then
             echo "yarn"
@@ -288,7 +288,7 @@ discover_project() {
     local e2e_dir=""
 
     # Detect package manager
-    if [[ -f "bun.lockb" ]]; then
+    if [[ -f "bun.lockb" ]] || [[ -f "bun.lock" ]]; then
         pkg_manager="bun"
     elif [[ -f "yarn.lock" ]]; then
         pkg_manager="yarn"
@@ -375,7 +375,7 @@ discover_project() {
     if [[ -f "package.json" ]]; then
         pkg_mtime=$(stat -f "%m" "package.json" 2>/dev/null || stat -c "%Y" "package.json" 2>/dev/null || echo "")
     fi
-    for lockfile in bun.lockb yarn.lock pnpm-lock.yaml package-lock.json Gemfile.lock; do
+    for lockfile in bun.lockb bun.lock yarn.lock pnpm-lock.yaml package-lock.json Gemfile.lock; do
         if [[ -f "$lockfile" ]]; then
             lock_mtime=$(stat -f "%m" "$lockfile" 2>/dev/null || stat -c "%Y" "$lockfile" 2>/dev/null || echo "")
             break
@@ -440,7 +440,7 @@ check_config_changed() {
     if [[ -f "package.json" ]]; then
         current_pkg_mtime=$(stat -f "%m" "package.json" 2>/dev/null || stat -c "%Y" "package.json" 2>/dev/null || echo "")
     fi
-    for lockfile in bun.lockb yarn.lock pnpm-lock.yaml package-lock.json Gemfile.lock; do
+    for lockfile in bun.lockb bun.lock yarn.lock pnpm-lock.yaml package-lock.json Gemfile.lock; do
         if [[ -f "$lockfile" ]]; then
             current_lock_mtime=$(stat -f "%m" "$lockfile" 2>/dev/null || stat -c "%Y" "$lockfile" 2>/dev/null || echo "")
             break
