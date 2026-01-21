@@ -1,866 +1,492 @@
 # feat: Production-Grade Autonomous Development Loop
 
-> Transform ralph-borg into a production-grade autonomous development system with near-full autonomy after spec creation, self-healing capabilities, and comprehensive quality gates.
+> Transform ralph-borg into a fire-and-forget autonomous development system with context preservation, self-healing, and quality gates.
 
 ---
 
 ## Overview
 
-Ralph-borg currently provides a solid foundation for autonomous feature implementation with its 10-phase iteration pattern, backpressure system, and integration with compound-engineering workflows. However, to achieve **production-grade, enterprise-level autonomous development**, several architectural improvements are needed.
+Ralph-borg works. The 2,934-line bash script successfully runs autonomous iteration loops. This plan adds three essential capabilities to achieve true "fire-and-forget after spec creation":
 
-This plan transforms ralph-borg from a "human-guided with autonomous execution" system into a **"fire-and-forget after spec creation"** system that:
+1. **Context Preservation** - Learnings persist across fresh Claude instances
+2. **Self-Healing** - Errors are automatically retried with context
+3. **Quality Enforcement** - All stacks get auto-detected quality gates
 
-1. Preserves and compounds context across fresh Claude instances
-2. Self-heals by detecting, diagnosing, and fixing bugs during iteration
-3. Enforces comprehensive quality gates (tests, lint, types, security) by default
-4. Searches and reuses existing code before generating new code
-5. Works with any tech stack through intelligent project detection
-6. Provides observability into autonomous operation
+No architectural rewrites. No module explosions. Surgical additions to what already works.
 
 ---
 
 ## Problem Statement
 
-### Current Limitations
-
-| Gap | Impact | Evidence |
-|-----|--------|----------|
-| **Monolithic Architecture** | Hard to test, extend, or maintain | Single 2,934-line bash script (`borg`) |
-| **No Structured Error Recovery** | Agent relies on judgment for error handling | Retry logic is generic exponential backoff |
-| **Limited Context Preservation** | Fresh instances lose learned patterns | `.borg/learnings.json` exists but isn't structured |
-| **No Code Reuse Detection** | Agent may rewrite existing functionality | No "search before write" enforcement |
-| **Missing Observability** | Can't measure iteration efficiency or identify bottlenecks | No metrics, logs are unstructured |
-| **No Schema Validation** | SPEC.md can be malformed | Markdown parsing is fragile |
-| **Single-Agent Architecture** | Can't parallelize research/implementation | Sequential execution only |
-
-### User Requirements
-
-From user interview:
-- **Primary Use:** Both greenfield and existing codebase work
-- **Oversight Level:** Fire-and-forget after initial planning (human reviews only final output)
-- **Tech Stack:** Stack-agnostic, auto-detects conventions
-- **Quality Focus:** All quality checks (tests + lint + types + security)
+| Gap | Impact | Fix |
+|-----|--------|-----|
+| Context doesn't survive across runs | Fresh Claude repeats mistakes | Add `.borg/context.yaml` |
+| Errors stop the loop | Human must intervene | Add retry with error in prompt |
+| Quality gates aren't universal | Some stacks miss checks | Extend discovery for all stacks |
 
 ---
 
-## Proposed Solution
+## Non-Goals (YAGNI)
 
-### Architecture Overview
+These were in the original plan. They're cut:
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         RALPH-BORG v2.0                                  │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐              │
-│  │   PLANNING   │───▶│ AUTONOMOUS   │───▶│   SHIPPING   │              │
-│  │    PHASE     │    │    LOOP      │    │    PHASE     │              │
-│  └──────────────┘    └──────────────┘    └──────────────┘              │
-│         │                   │                   │                        │
-│         ▼                   ▼                   ▼                        │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐              │
-│  │ /workflows:  │    │  10-Phase    │    │ /workflows:  │              │
-│  │    plan      │    │  Iteration   │    │   review     │              │
-│  │ /deepen-plan │    │   Engine     │    │   PR/Ship    │              │
-│  └──────────────┘    └──────────────┘    └──────────────┘              │
-│                             │                                            │
-│                             ▼                                            │
-│  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │                    CORE SUBSYSTEMS                                 │ │
-│  ├───────────────────────────────────────────────────────────────────┤ │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐│ │
-│  │  │   Context   │  │   Self-     │  │   Quality   │  │  Code     ││ │
-│  │  │   Engine    │  │   Healing   │  │   Gates     │  │  Reuse    ││ │
-│  │  │             │  │   Engine    │  │   Engine    │  │  Engine   ││ │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘  └───────────┘│ │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐│ │
-│  │  │   Project   │  │   SPEC      │  │   Metrics   │  │  Multi-   ││ │
-│  │  │   Discovery │  │   Schema    │  │   &         │  │  Agent    ││ │
-│  │  │             │  │   Engine    │  │   Observ.   │  │  Coord.   ││ │
-│  │  └─────────────┘  └─────────────┘  └─────────────┘  └───────────┘│ │
-│  └───────────────────────────────────────────────────────────────────┘ │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-### Key Design Decisions
-
-1. **Modular Architecture** - Break monolithic script into composable modules
-2. **Structured State** - SPEC as YAML with JSON Schema validation
-3. **Self-Healing Pipeline** - Error → Diagnose → Fix → Retry cycle
-4. **Code-First Search** - Mandatory codebase search before generation
-5. **Observable by Default** - Structured logs, metrics, traces
-6. **Multi-Agent Ready** - Architecture supports parallel agent coordination
+- **Module architecture** - Single file with sections is fine
+- **YAML SPEC format** - Markdown works, fix the parser if needed
+- **Codebase indexing** - Use ripgrep at query time
+- **Similarity detection** - Prompt instruction covers it
+- **Multi-agent coordination** - Not needed now
+- **Metrics dashboard** - Simple logs suffice
+- **Tiered quality gates** - One tier: pass or fail
 
 ---
 
-## Technical Approach
+## Implementation
 
-### Phase 1: Foundation - Modular Architecture
+### Phase 1: Context Preservation
 
-**Objective:** Transform monolithic `borg` script into testable, extensible modules.
+**Goal:** Learnings survive across `borg implement` runs.
 
-#### Tasks
+#### Task 1: Create context file structure
 
-- [ ] Task 1: Create module directory structure
-  - File: `lib/core/cli.sh` - Command parsing and routing
-  - File: `lib/core/config.sh` - Configuration management
-  - File: `lib/core/logger.sh` - Structured logging
-  - Test: `tests/unit/cli.bats` (using Bats testing framework)
+Add to `borg`:
 
-- [ ] Task 2: Extract project discovery module
-  - File: `lib/discovery/project.sh` - Project type detection
-  - File: `lib/discovery/commands.sh` - Build/test/lint command discovery
-  - File: `lib/discovery/files.sh` - Key file identification
-  - Test: `tests/unit/discovery.bats`
+```bash
+# Context file location
+CONTEXT_FILE=".borg/context.yaml"
 
-- [ ] Task 3: Extract iteration engine
-  - File: `lib/engine/iteration.sh` - Core 10-phase loop
-  - File: `lib/engine/retry.sh` - Retry logic with circuit breaker
-  - File: `lib/engine/signals.sh` - Graceful shutdown handling
-  - Test: `tests/unit/engine.bats`
+init_context() {
+  if [[ ! -f "$CONTEXT_FILE" ]]; then
+    cat > "$CONTEXT_FILE" << 'EOF'
+# Ralph-borg accumulated context
+# This file persists across iterations
 
-- [ ] Task 4: Extract quality gates module
-  - File: `lib/gates/runner.sh` - Gate execution
-  - File: `lib/gates/lint.sh` - Linting integration
-  - File: `lib/gates/test.sh` - Test execution
-  - File: `lib/gates/security.sh` - Security scanning
-  - Test: `tests/unit/gates.bats`
-
-- [ ] Task 5: Create main entry point that sources modules
-  - File: `borg` - Slim entry point (~100 lines)
-  - Validate: All existing commands still work
-
-**Success Criteria:**
-- [ ] `borg` script under 200 lines
-- [ ] All modules have corresponding tests
-- [ ] `bats tests/` passes
-- [ ] Existing CLI interface unchanged
-
----
-
-### Phase 2: Context Engine - Preserved Learning
-
-**Objective:** Ensure context and learnings persist and compound across fresh Claude instances.
-
-#### Tasks
-
-- [ ] Task 1: Design structured context schema
-  - File: `lib/context/schema.sh` - Context validation
-  - File: `schemas/context.json` - JSON Schema for context
-  ```yaml
-  # .borg/context.yaml
-  project:
-    type: bun | npm | rails | python | go | rust
-    root: /path/to/project
-    discovered_at: 2026-01-21T10:00:00Z
-
-  patterns:
-    - name: "API Route Pattern"
-      location: "src/routes/*.ts"
-      description: "All routes use express-style middleware"
-      discovered_iteration: 3
-
-  decisions:
-    - date: 2026-01-21
-      decision: "Use Zod for validation"
-      rationale: "Already used in 3 other places"
-
-  learnings:
-    - category: gotcha
-      content: "Must run db:migrate before tests"
-      discovered_iteration: 2
-
-  errors_encountered:
-    - error_signature: "ECONNREFUSED localhost:5432"
-      root_cause: "Database not running"
-      fix: "docker-compose up -d postgres"
-      occurrences: 2
-  ```
-
-- [ ] Task 2: Implement context reading/writing
-  - File: `lib/context/reader.sh` - Load context for iteration
-  - File: `lib/context/writer.sh` - Update context after iteration
-  - File: `lib/context/merger.sh` - Merge new learnings with existing
-  - Test: `tests/unit/context.bats`
-
-- [ ] Task 3: Inject context into PROMPT.md generation
-  - Edit: `templates/PROMPT-template.md` - Add context injection section
-  ```markdown
-  ## Accumulated Context
-
-  ### Patterns Discovered
-  {{patterns}}
-
-  ### Previous Decisions
-  {{decisions}}
-
-  ### Known Gotchas
-  {{learnings | filter: gotcha}}
-
-  ### Error Fixes (Don't Repeat These)
-  {{errors_encountered}}
-  ```
-
-- [ ] Task 4: Add context compounding from /workflows:compound
-  - File: `lib/context/compound.sh` - Integrate with docs/solutions/
-  - Validate: Context includes relevant solutions from past work
-
-**Success Criteria:**
-- [ ] Context survives across `borg implement` runs
-- [ ] Learnings from iteration N visible in iteration N+1
-- [ ] Error patterns stored and used to prevent repeats
-- [ ] Context schema validates with JSON Schema
-
----
-
-### Phase 3: Self-Healing Engine
-
-**Objective:** Automatically detect, diagnose, and fix errors during autonomous operation.
-
-#### Tasks
-
-- [ ] Task 1: Implement error classification
-  - File: `lib/healing/classifier.sh` - Classify errors by type
-  ```bash
-  # Error categories:
-  # - SYNTAX: Parse/compile errors (fixable by editing code)
-  # - RUNTIME: Execution errors (may need debugging)
-  # - DEPENDENCY: Missing packages (fixable by install)
-  # - ENVIRONMENT: Config/env issues (may need human)
-  # - TEST_FAILURE: Tests fail (fixable by editing code/tests)
-  # - LINT_VIOLATION: Style issues (fixable by formatting)
-  # - TYPE_ERROR: Type mismatches (fixable by editing types)
-  ```
-
-- [ ] Task 2: Create diagnosis pipeline
-  - File: `lib/healing/diagnoser.sh` - Analyze error context
-  - File: `lib/healing/strategies.sh` - Healing strategy selection
-  ```bash
-  # Strategy selection based on error type:
-  # SYNTAX → Extract error location, read file, prompt fix
-  # TEST_FAILURE → Run test in verbose mode, identify assertion
-  # DEPENDENCY → Parse error, suggest install command
-  # TYPE_ERROR → Extract type mismatch, suggest correction
-  ```
-
-- [ ] Task 3: Implement fix-and-retry loop
-  - File: `lib/healing/executor.sh` - Execute healing strategies
-  - File: `lib/healing/circuit_breaker.sh` - Prevent infinite fix loops
-  ```bash
-  # Circuit breaker conditions:
-  CB_SAME_ERROR_THRESHOLD=3      # Same error 3 times → stop
-  CB_TOTAL_FIX_ATTEMPTS=10       # 10 fixes total → stop
-  CB_FIX_TIME_LIMIT=300          # 5 min fixing same issue → stop
-  ```
-
-- [ ] Task 4: Add self-healing to iteration loop
-  - Edit: `lib/engine/iteration.sh` - Integrate healing after validation
-  ```bash
-  # Phase 5: VALIDATE
-  if ! run_quality_gates; then
-    if can_self_heal "$last_error"; then
-      attempt_self_heal "$last_error"
-      # Re-run validation after healing
-    else
-      record_blocked_task "$current_task" "$last_error"
-    fi
+learnings: []
+errors_fixed: []
+patterns_discovered: []
+EOF
   fi
-  ```
+}
+```
 
-- [ ] Task 5: Store healing outcomes for learning
-  - Edit: `lib/context/writer.sh` - Record successful fixes
-  - Validate: Future iterations can reuse fix patterns
+#### Task 2: Inject context into PROMPT
 
-**Success Criteria:**
-- [ ] Lint errors auto-fixed without human intervention
-- [ ] Simple test failures debugged and fixed
-- [ ] Dependency errors resolved by install
-- [ ] Circuit breaker prevents infinite loops
-- [ ] Fix patterns stored in context for reuse
+Edit `templates/PROMPT-template.md`:
 
----
+```markdown
+## Accumulated Context
 
-### Phase 4: Code Reuse Engine
+### Learnings from Previous Iterations
+{{learnings}}
 
-**Objective:** Always search existing code before generating new code.
+### Errors You've Fixed Before (Don't Repeat)
+{{errors_fixed}}
 
-#### Tasks
+### Patterns Discovered in This Codebase
+{{patterns_discovered}}
+```
 
-- [ ] Task 1: Implement codebase indexing
-  - File: `lib/reuse/indexer.sh` - Index project files
-  - File: `lib/reuse/cache.sh` - Cache index for performance
-  ```bash
-  # Index structure:
-  # .borg/index/
-  #   functions.json    # Function names → file:line
-  #   classes.json      # Class names → file:line
-  #   patterns.json     # Common patterns → examples
-  #   imports.json      # What imports what
-  ```
+Add to `borg` spec command:
 
-- [ ] Task 2: Create search-before-write enforcement
-  - File: `lib/reuse/searcher.sh` - Search for existing implementations
-  - Edit: `templates/PROMPT-template.md` - Add mandatory search phase
-  ```markdown
-  ## Phase 3: INVESTIGATE (MANDATORY)
+```bash
+inject_context() {
+  local prompt_file="$1"
+  local learnings errors patterns
 
-  Before writing ANY new code:
+  if [[ -f "$CONTEXT_FILE" ]]; then
+    learnings=$(yq -r '.learnings | map("- " + .) | join("\n")' "$CONTEXT_FILE")
+    errors=$(yq -r '.errors_fixed | map("- " + .error + " → Fix: " + .fix) | join("\n")' "$CONTEXT_FILE")
+    patterns=$(yq -r '.patterns_discovered | map("- " + .) | join("\n")' "$CONTEXT_FILE")
+  fi
 
-  1. Search for existing implementations:
-     - `grep -r "function_name" src/`
-     - Check: src/utils/, src/lib/, src/shared/
+  sed -i '' \
+    -e "s/{{learnings}}/${learnings:-None yet}/g" \
+    -e "s/{{errors_fixed}}/${errors:-None yet}/g" \
+    -e "s/{{patterns_discovered}}/${patterns:-None yet}/g" \
+    "$prompt_file"
+}
+```
 
-  2. If found:
-     - Import and use existing code
-     - Extend if needed, don't duplicate
-     - Document why extension was necessary
+#### Task 3: Update context after iteration
 
-  3. If not found:
-     - Proceed with implementation
-     - Add to shared location if reusable
+Add to iteration completion:
 
-  **HARD RULE:** Do NOT generate code that duplicates existing functionality.
-  ```
+```bash
+add_learning() {
+  local learning="$1"
+  yq -i ".learnings += [\"$learning\"]" "$CONTEXT_FILE"
+}
 
-- [ ] Task 3: Add similarity detection
-  - File: `lib/reuse/similarity.sh` - Detect similar code patterns
-  - Validate: Warn if new code >70% similar to existing
+add_error_fix() {
+  local error="$1"
+  local fix="$2"
+  yq -i ".errors_fixed += [{\"error\": \"$error\", \"fix\": \"$fix\"}]" "$CONTEXT_FILE"
+}
 
-- [ ] Task 4: Track code reuse metrics
-  - File: `lib/metrics/reuse.sh` - Track reuse vs generation
-  - Output: `.borg/metrics/reuse.json`
-  ```json
-  {
-    "iteration": 5,
-    "functions_reused": 3,
-    "functions_generated": 1,
-    "reuse_ratio": 0.75
-  }
-  ```
+add_pattern() {
+  local pattern="$1"
+  yq -i ".patterns_discovered += [\"$pattern\"]" "$CONTEXT_FILE"
+}
+```
 
-**Success Criteria:**
-- [ ] Every implementation task searches codebase first
-- [ ] Reuse ratio tracked per iteration
-- [ ] Duplicate code generation flagged
-- [ ] Index updates automatically after changes
+#### Task 4: Context pruning (keep it bounded)
 
----
+```bash
+CONTEXT_MAX_LEARNINGS=50
+CONTEXT_MAX_ERRORS=20
+CONTEXT_MAX_PATTERNS=30
 
-### Phase 5: Quality Gates Engine
+prune_context() {
+  # Keep only most recent entries
+  yq -i ".learnings = .learnings | .[-$CONTEXT_MAX_LEARNINGS:]" "$CONTEXT_FILE"
+  yq -i ".errors_fixed = .errors_fixed | .[-$CONTEXT_MAX_ERRORS:]" "$CONTEXT_FILE"
+  yq -i ".patterns_discovered = .patterns_discovered | .[-$CONTEXT_MAX_PATTERNS:]" "$CONTEXT_FILE"
+}
+```
 
-**Objective:** Comprehensive, stack-agnostic quality enforcement.
-
-#### Tasks
-
-- [ ] Task 1: Extend project discovery for all quality tools
-  - Edit: `lib/discovery/commands.sh` - Detect all quality tools
-  ```bash
-  # Auto-detect quality gates by stack:
-  # JavaScript/TypeScript:
-  #   - Test: jest, vitest, mocha, ava, bun test
-  #   - Lint: eslint, biome, prettier
-  #   - Types: tsc --noEmit, tsc -b
-  #   - Security: npm audit, snyk
-  # Ruby:
-  #   - Test: rspec, minitest
-  #   - Lint: rubocop, standardrb
-  #   - Security: brakeman, bundler-audit
-  # Python:
-  #   - Test: pytest, unittest
-  #   - Lint: ruff, flake8, black
-  #   - Types: mypy, pyright
-  #   - Security: bandit, safety
-  # Go:
-  #   - Test: go test
-  #   - Lint: golangci-lint
-  #   - Security: gosec
-  # Rust:
-  #   - Test: cargo test
-  #   - Lint: cargo clippy
-  #   - Security: cargo audit
-  ```
-
-- [ ] Task 2: Implement tiered gate execution
-  - File: `lib/gates/tiered.sh` - Execute gates in tiers
-  ```bash
-  # Tier 1: BLOCKING (must pass to continue)
-  #   - Tests pass
-  #   - Types check
-  #   - Lint clean (errors only)
-
-  # Tier 2: IMPORTANT (should pass, warn if not)
-  #   - Coverage threshold
-  #   - Lint warnings
-  #   - Bundle size
-
-  # Tier 3: ADVISORY (nice to have)
-  #   - Documentation coverage
-  #   - Code complexity
-  ```
-
-- [ ] Task 3: Add security scanning
-  - File: `lib/gates/security.sh` - Security-specific checks
-  - Validate: No high/critical vulnerabilities in new code
-
-- [ ] Task 4: Implement per-task validation
-  - Edit: `lib/engine/iteration.sh` - Run gates after each task
-  ```bash
-  # After each task:
-  run_tier1_gates_on_changed_files
-
-  # Before marking complete:
-  run_all_gates
-  ```
-
-- [ ] Task 5: Add gate result caching
-  - File: `lib/gates/cache.sh` - Cache passing results
-  - Validate: Only re-run gates for changed files
-
-**Success Criteria:**
-- [ ] All major stacks auto-detected
-- [ ] Tier 1 gates block progress
-- [ ] Security scans run on new code
-- [ ] Gate results cached for performance
+**Success criteria:**
+- [ ] Context file created on `borg init`
+- [ ] Context injected into PROMPT.md
+- [ ] Learnings added after successful iterations
+- [ ] Context stays under 100 entries total
 
 ---
 
-### Phase 6: SPEC Schema Engine
+### Phase 2: Self-Healing
 
-**Objective:** Validate SPEC.md structure to prevent malformed specs.
+**Goal:** Automatically retry failures with error context.
 
-#### Tasks
+#### Task 1: Add retry-with-context logic
 
-- [ ] Task 1: Define SPEC schema
-  - File: `schemas/spec.yaml` - YAML-based SPEC format
-  ```yaml
-  # schemas/spec.yaml
-  type: object
-  required:
-    - metadata
-    - requirements
-    - tasks
-    - quality_gates
-    - exit_criteria
-  properties:
-    metadata:
-      type: object
-      required: [name, status, created, project_type]
-      properties:
-        name:
-          type: string
-          pattern: "^[a-z0-9-]+$"
-        status:
-          enum: [pending, building, complete, blocked]
-        iteration_count:
-          type: integer
-          minimum: 0
-    requirements:
-      type: array
-      items:
-        type: object
-        required: [id, description, completed]
-    tasks:
-      type: object
-      required: [pending, in_progress, completed, blocked]
-    quality_gates:
-      type: object
-      required: [per_task, full, visual]
-    exit_criteria:
-      type: array
-      minItems: 1
-  ```
+Replace simple retry with context-aware retry:
 
-- [ ] Task 2: Implement SPEC validation
-  - File: `lib/spec/validator.sh` - Validate SPEC against schema
-  - File: `lib/spec/parser.sh` - Parse SPEC.md to structured format
-  - Test: `tests/unit/spec.bats`
+```bash
+MAX_SELF_HEAL_ATTEMPTS=3
 
-- [ ] Task 3: Add SPEC repair capability
-  - File: `lib/spec/repair.sh` - Auto-fix common SPEC issues
-  - Validate: Malformed SPECs repaired before iteration
+run_iteration_with_healing() {
+  local spec_dir="$1"
+  local attempt=1
+  local last_error=""
 
-- [ ] Task 4: Migrate templates to new schema
-  - Edit: `templates/SPEC-template.md` - Use new validated structure
-  - Edit: `borg` spec command - Generate validated SPECs
+  while [[ $attempt -le $MAX_SELF_HEAL_ATTEMPTS ]]; do
+    log_info "Iteration attempt $attempt/$MAX_SELF_HEAL_ATTEMPTS"
 
-**Success Criteria:**
-- [ ] All SPECs validate against schema
-- [ ] Invalid SPECs rejected with clear errors
-- [ ] Auto-repair for common issues
-- [ ] Template generates valid SPECs
+    # Run iteration, capture result
+    if output=$(run_claude_iteration "$spec_dir" "$last_error" 2>&1); then
+      return 0  # Success
+    fi
+
+    last_error="$output"
+
+    # Check if this is a fixable error
+    if is_unfixable_error "$last_error"; then
+      log_error "Unfixable error encountered, stopping"
+      record_blocked_iteration "$spec_dir" "$last_error"
+      return 1
+    fi
+
+    log_warn "Iteration failed, retrying with error context..."
+    add_error_to_prompt "$spec_dir" "$last_error"
+
+    ((attempt++))
+  done
+
+  log_error "Max self-heal attempts reached"
+  record_blocked_iteration "$spec_dir" "$last_error"
+  return 1
+}
+```
+
+#### Task 2: Error context injection
+
+```bash
+add_error_to_prompt() {
+  local spec_dir="$1"
+  local error="$2"
+  local prompt_file="$spec_dir/PROMPT.md"
+
+  # Append error context to prompt
+  cat >> "$prompt_file" << EOF
 
 ---
 
-### Phase 7: Metrics & Observability
+## SELF-HEALING CONTEXT
 
-**Objective:** Provide visibility into autonomous operation.
+The previous iteration failed with this error:
 
-#### Tasks
+\`\`\`
+$error
+\`\`\`
 
-- [ ] Task 1: Implement structured logging
-  - File: `lib/core/logger.sh` - JSON-structured logs
-  ```bash
-  # Log format:
-  {
-    "timestamp": "2026-01-21T10:30:00Z",
-    "level": "info",
-    "iteration": 5,
-    "phase": "implement",
-    "task": "Create user model",
-    "event": "task_started",
-    "context": {...}
-  }
-  ```
+Please:
+1. Analyze what went wrong
+2. Fix the issue
+3. Re-run validation to confirm the fix
+4. Continue with the current task
 
-- [ ] Task 2: Add iteration metrics
-  - File: `lib/metrics/iteration.sh` - Track iteration stats
-  ```json
-  {
-    "iteration": 5,
-    "duration_seconds": 120,
-    "tasks_completed": 1,
-    "tasks_attempted": 1,
-    "errors_encountered": 0,
-    "self_heals": 0,
-    "code_reuse_ratio": 0.75,
-    "gates_passed": ["test", "lint", "types"],
-    "gates_failed": []
-  }
-  ```
+EOF
+}
+```
 
-- [ ] Task 3: Create dashboard output
-  - File: `lib/metrics/dashboard.sh` - Summary view
-  - Command: `borg dashboard [spec]` - Show metrics
-  ```
-  ┌─────────────────────────────────────────────┐
-  │ SPEC: user-authentication                   │
-  │ Status: building (iteration 5/∞)            │
-  ├─────────────────────────────────────────────┤
-  │ Progress: ████████░░ 80% (8/10 tasks)       │
-  │ Time: 45m elapsed                           │
-  │ Health: ✅ All gates passing                │
-  ├─────────────────────────────────────────────┤
-  │ Efficiency:                                 │
-  │   Avg iteration: 5.2 min                    │
-  │   Self-heals: 2 (both successful)           │
-  │   Code reuse: 68%                           │
-  └─────────────────────────────────────────────┘
-  ```
+#### Task 3: Identify unfixable errors
 
-- [ ] Task 4: Add trace file for debugging
-  - File: `lib/metrics/tracer.sh` - Detailed execution trace
-  - Output: `.borg/traces/iteration-N.json`
+```bash
+is_unfixable_error() {
+  local error="$1"
 
-**Success Criteria:**
-- [ ] All iterations produce structured logs
-- [ ] Metrics available via `borg dashboard`
-- [ ] Traces enable debugging stuck iterations
-- [ ] Metrics persisted for historical analysis
+  # These errors require human intervention
+  local unfixable_patterns=(
+    "API key"
+    "authentication failed"
+    "permission denied"
+    "disk full"
+    "out of memory"
+    "rate limit exceeded"
+    "SIGKILL"
+  )
+
+  for pattern in "${unfixable_patterns[@]}"; do
+    if [[ "$error" == *"$pattern"* ]]; then
+      return 0  # Is unfixable
+    fi
+  done
+
+  return 1  # Is fixable (or at least worth trying)
+}
+```
+
+#### Task 4: Record successful fixes for learning
+
+```bash
+record_successful_fix() {
+  local error="$1"
+  local fix_description="$2"
+
+  add_error_fix "$error" "$fix_description"
+  log_success "Learned fix: $error → $fix_description"
+}
+```
+
+**Success criteria:**
+- [ ] Lint errors auto-fixed on retry
+- [ ] Test failures retried with error context
+- [ ] Unfixable errors stop immediately
+- [ ] Successful fixes recorded in context
 
 ---
 
-### Phase 8: Multi-Agent Coordination (Future-Ready)
+### Phase 3: Universal Quality Gates
 
-**Objective:** Architecture supports parallel agent execution.
+**Goal:** Auto-detect and run quality gates for any stack.
 
-#### Tasks
+#### Task 1: Extend project discovery
 
-- [ ] Task 1: Design agent coordination protocol
-  - File: `lib/agents/protocol.sh` - Agent communication spec
-  ```bash
-  # Agent roles:
-  # - RESEARCHER: Searches codebase, reads docs
-  # - IMPLEMENTER: Writes code, creates tests
-  # - REVIEWER: Reviews changes, suggests fixes
-  # - FIXER: Handles self-healing
+Add comprehensive quality command detection to existing `detect_project_type`:
 
-  # Coordination:
-  # - Agents write to shared state file
-  # - Lock mechanism prevents conflicts
-  # - Results aggregated after parallel work
-  ```
+```bash
+discover_quality_commands() {
+  local project_type="$1"
+  local quality_commands=()
 
-- [ ] Task 2: Implement agent spawning
-  - File: `lib/agents/spawner.sh` - Launch parallel agents
-  - Validate: Can run multiple agents in parallel
+  case "$project_type" in
+    bun)
+      [[ -n "$(jq -r '.scripts.test // empty' package.json 2>/dev/null)" ]] && \
+        quality_commands+=("bun test")
+      [[ -n "$(jq -r '.scripts.lint // empty' package.json 2>/dev/null)" ]] && \
+        quality_commands+=("bun run lint")
+      [[ -n "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && \
+        quality_commands+=("bun run typecheck")
+      [[ -f "tsconfig.json" ]] && quality_commands+=("bun run tsc --noEmit")
+      ;;
 
-- [ ] Task 3: Add result aggregation
-  - File: `lib/agents/aggregator.sh` - Combine agent outputs
-  - Validate: Multiple agent results merged coherently
+    npm|yarn|pnpm)
+      local runner="npm run"
+      [[ "$project_type" == "yarn" ]] && runner="yarn"
+      [[ "$project_type" == "pnpm" ]] && runner="pnpm run"
 
-- [ ] Task 4: Document multi-agent patterns
-  - File: `docs/multi-agent.md` - How to use parallel agents
-  - Example: Research + Implementation in parallel
+      [[ -n "$(jq -r '.scripts.test // empty' package.json 2>/dev/null)" ]] && \
+        quality_commands+=("$runner test")
+      [[ -n "$(jq -r '.scripts.lint // empty' package.json 2>/dev/null)" ]] && \
+        quality_commands+=("$runner lint")
+      [[ -f "tsconfig.json" ]] && quality_commands+=("npx tsc --noEmit")
+      ;;
 
-**Success Criteria:**
-- [ ] Architecture supports multiple agents
-- [ ] No conflicts with parallel execution
-- [ ] Clear documentation for multi-agent use
-- [ ] Single-agent mode remains default
+    rails)
+      [[ -f "bin/rails" ]] && quality_commands+=("bin/rails test")
+      [[ -f ".rubocop.yml" ]] && quality_commands+=("bundle exec rubocop")
+      [[ -f "Gemfile" ]] && grep -q "brakeman" Gemfile && \
+        quality_commands+=("bundle exec brakeman -q")
+      ;;
+
+    python)
+      [[ -f "pytest.ini" || -f "pyproject.toml" ]] && quality_commands+=("pytest")
+      [[ -f "pyproject.toml" ]] && grep -q "ruff" pyproject.toml && \
+        quality_commands+=("ruff check .")
+      [[ -f "pyproject.toml" ]] && grep -q "mypy" pyproject.toml && \
+        quality_commands+=("mypy .")
+      ;;
+
+    go)
+      quality_commands+=("go test ./...")
+      command -v golangci-lint &>/dev/null && quality_commands+=("golangci-lint run")
+      ;;
+
+    rust)
+      quality_commands+=("cargo test")
+      quality_commands+=("cargo clippy -- -D warnings")
+      ;;
+  esac
+
+  printf '%s\n' "${quality_commands[@]}"
+}
+```
+
+#### Task 2: Run all gates, fail on any failure
+
+```bash
+run_quality_gates() {
+  local project_type="$1"
+  local failed=0
+
+  while IFS= read -r cmd; do
+    [[ -z "$cmd" ]] && continue
+
+    log_step "Running: $cmd"
+    if ! eval "$cmd"; then
+      log_error "Gate failed: $cmd"
+      failed=1
+    else
+      log_success "Gate passed: $cmd"
+    fi
+  done < <(discover_quality_commands "$project_type")
+
+  return $failed
+}
+```
+
+#### Task 3: Add "search before write" to PROMPT
+
+Edit `templates/PROMPT-template.md`, add to Phase 3 (INVESTIGATE):
+
+```markdown
+## Phase 3: INVESTIGATE (MANDATORY)
+
+Before writing ANY new code:
+
+1. **Search for existing implementations:**
+   - Use grep/ripgrep to find similar function names
+   - Check: src/utils/, src/lib/, src/shared/, lib/
+
+2. **If found:**
+   - Import and use existing code
+   - Extend if needed, document why
+   - DO NOT duplicate functionality
+
+3. **If not found:**
+   - Proceed with implementation
+   - Consider adding to shared location if reusable
+
+**HARD RULE:** Search first. The codebase may already have what you need.
+```
+
+**Success criteria:**
+- [ ] All 6 supported stacks have quality commands discovered
+- [ ] Gates run after each task completion
+- [ ] "Search before write" instruction in every PROMPT
+- [ ] Gates failure triggers self-healing retry
 
 ---
 
-## Alternative Approaches Considered
+## Files Changed
 
-### 1. Rewrite in TypeScript/Python
+| File | Change |
+|------|--------|
+| `borg` | +~150 lines (context, healing, gates) |
+| `templates/PROMPT-template.md` | +~30 lines (context injection, search-before-write) |
 
-**Considered:** Rewriting `borg` in a typed language for better maintainability.
-
-**Rejected because:**
-- Bash is universal (no runtime dependencies)
-- Current users don't need Node/Python installed
-- Modular bash with tests achieves similar maintainability
-- Migration cost outweighs benefits for v2.0
-
-**Future consideration:** May revisit for v3.0 if complexity grows.
-
-### 2. Full RAG-Based Code Search
-
-**Considered:** Vector embeddings for semantic code search.
-
-**Rejected because:**
-- Requires embedding infrastructure
-- Adds significant complexity
-- Grep + structural search covers 90% of use cases
-- Can add later as optional enhancement
-
-### 3. Kubernetes-Based Agent Orchestration
-
-**Considered:** Running agents as K8s pods for true parallelism.
-
-**Rejected because:**
-- Overkill for single-developer use case
-- Adds infrastructure requirements
-- Current approach (multiple Claude instances) works
-- Can add later for enterprise use
+**Total new code:** ~180 lines
 
 ---
 
 ## Acceptance Criteria
 
-### Functional Requirements
-
-- [ ] **F1:** Fresh Claude instance can continue work from previous instance
-- [ ] **F2:** Errors are automatically diagnosed and fixed when possible
-- [ ] **F3:** Codebase is searched before any new code generation
-- [ ] **F4:** All quality gates run after each task completion
-- [ ] **F5:** SPEC.md validates against defined schema
-- [ ] **F6:** Metrics are available for every iteration
-- [ ] **F7:** Works with all supported stacks (JS, Ruby, Python, Go, Rust)
-
-### Non-Functional Requirements
-
-- [ ] **NF1:** Iteration completes in <10 minutes for typical tasks
-- [ ] **NF2:** Self-healing resolves >80% of lint/type errors
-- [ ] **NF3:** Code reuse ratio >50% for mature codebases
-- [ ] **NF4:** False positive rate for "reuse detection" <10%
-- [ ] **NF5:** Memory usage <500MB during iteration
-
-### Quality Gates
-
-- [ ] All modules have unit tests
-- [ ] Test coverage >80% for core modules
-- [ ] `shellcheck` passes on all bash files
-- [ ] Documentation complete for all commands
-- [ ] README updated with new capabilities
+- [ ] Fresh Claude instance continues work using context from previous runs
+- [ ] Lint/test failures retry with error in prompt (up to 3 times)
+- [ ] Unfixable errors stop immediately with clear message
+- [ ] Successful fixes are recorded and reused
+- [ ] All stacks (JS, TS, Ruby, Python, Go, Rust) have quality gates
+- [ ] "Search before write" instruction in every PROMPT
 
 ---
 
 ## Success Metrics
 
-| Metric | Target | How to Measure |
-|--------|--------|----------------|
-| Autonomous completion rate | >90% | SPECs completed without human intervention |
-| Self-healing success rate | >80% | Errors fixed / errors encountered |
-| Code reuse ratio | >50% | Functions reused / functions written |
-| Iteration efficiency | <10 min avg | Time per iteration |
-| Context preservation | 100% | Learnings available in next iteration |
-| Quality gate coverage | 100% | All tasks have gates run |
+| Metric | Target |
+|--------|--------|
+| Autonomous completion rate | >90% SPECs complete without intervention |
+| Self-healing success rate | >70% of lint/test errors fixed on retry |
+| Context utilization | Learnings referenced in subsequent iterations |
 
 ---
 
-## Dependencies & Prerequisites
+## What We're NOT Doing
 
-### Required Tools
+Per reviewer consensus:
 
-- **Bash 4.0+** - For associative arrays and modern features
-- **jq** - JSON processing
-- **yq** - YAML processing
-- **Bats** - Bash testing framework
-- **ShellCheck** - Bash linting
+1. **No module architecture** - Single file stays single file
+2. **No YAML SPEC migration** - Markdown works fine
+3. **No codebase indexing** - ripgrep at query time
+4. **No similarity detection** - Prompt instruction suffices
+5. **No multi-agent support** - Add when actually needed
+6. **No metrics dashboard** - Logs are enough
+7. **No JSON Schema validation** - Simple section checks if needed
 
-### External Integrations
+---
 
-- Claude Code CLI (`claude`)
-- compound-engineering plugin (for /workflows:*)
-- ralph-wiggum plugin (for loop mechanics)
+## Testing
 
-### File Structure After Implementation
+Add to existing test workflow:
 
-```
-ralph-borg/
-├── borg                          # Entry point (~100 lines)
-├── lib/
-│   ├── core/
-│   │   ├── cli.sh
-│   │   ├── config.sh
-│   │   └── logger.sh
-│   ├── discovery/
-│   │   ├── project.sh
-│   │   ├── commands.sh
-│   │   └── files.sh
-│   ├── engine/
-│   │   ├── iteration.sh
-│   │   ├── retry.sh
-│   │   └── signals.sh
-│   ├── context/
-│   │   ├── schema.sh
-│   │   ├── reader.sh
-│   │   ├── writer.sh
-│   │   └── merger.sh
-│   ├── healing/
-│   │   ├── classifier.sh
-│   │   ├── diagnoser.sh
-│   │   ├── strategies.sh
-│   │   ├── executor.sh
-│   │   └── circuit_breaker.sh
-│   ├── reuse/
-│   │   ├── indexer.sh
-│   │   ├── searcher.sh
-│   │   ├── similarity.sh
-│   │   └── cache.sh
-│   ├── gates/
-│   │   ├── runner.sh
-│   │   ├── tiered.sh
-│   │   ├── lint.sh
-│   │   ├── test.sh
-│   │   ├── security.sh
-│   │   └── cache.sh
-│   ├── spec/
-│   │   ├── validator.sh
-│   │   ├── parser.sh
-│   │   └── repair.sh
-│   ├── metrics/
-│   │   ├── iteration.sh
-│   │   ├── reuse.sh
-│   │   ├── dashboard.sh
-│   │   └── tracer.sh
-│   └── agents/
-│       ├── protocol.sh
-│       ├── spawner.sh
-│       └── aggregator.sh
-├── schemas/
-│   ├── spec.yaml
-│   ├── context.json
-│   └── metrics.json
-├── templates/
-│   ├── SPEC-template.md
-│   └── PROMPT-template.md
-├── tests/
-│   ├── unit/
-│   │   ├── cli.bats
-│   │   ├── discovery.bats
-│   │   ├── engine.bats
-│   │   ├── context.bats
-│   │   ├── healing.bats
-│   │   ├── reuse.bats
-│   │   ├── gates.bats
-│   │   └── spec.bats
-│   └── integration/
-│       ├── full-loop.bats
-│       └── self-healing.bats
-├── docs/
-│   ├── architecture.md
-│   ├── self-healing.md
-│   ├── quality-gates.md
-│   ├── context-preservation.md
-│   ├── code-reuse.md
-│   └── multi-agent.md
-├── plans/
-└── specs/
+```bash
+# Test context persistence
+test_context_persistence() {
+  borg init /tmp/test-project
+  echo "learnings: ['test learning']" > /tmp/test-project/.borg/context.yaml
+  # Verify context appears in generated PROMPT
+  borg spec /tmp/test-project/plans/test.md
+  grep -q "test learning" /tmp/test-project/specs/test/PROMPT.md
+}
+
+# Test self-healing retry
+test_self_healing() {
+  # Mock a failing iteration that succeeds on retry
+  # Verify retry count and error context injection
+}
+
+# Test quality gate discovery
+test_quality_gates() {
+  for type in bun npm rails python go rust; do
+    # Create minimal project structure
+    # Verify correct commands discovered
+  done
+}
 ```
 
 ---
 
-## Risk Analysis & Mitigation
+## Implementation Order
 
-| Risk | Likelihood | Impact | Mitigation |
-|------|------------|--------|------------|
-| Modularization breaks existing commands | Medium | High | Comprehensive test suite before refactor |
-| Self-healing creates more bugs | Medium | Medium | Circuit breaker + human review for complex fixes |
-| Context file corruption | Low | High | Backup before write, atomic updates |
-| False positive code reuse detection | Medium | Low | Similarity threshold tuning, manual override |
-| Performance degradation from checks | Medium | Medium | Caching, parallel execution where safe |
-| Schema migration breaks existing SPECs | Low | High | Migration script + backwards compatibility |
+1. **Context preservation** (Phase 1) - Foundation for everything else
+2. **Self-healing** (Phase 2) - Depends on context for learning
+3. **Quality gates** (Phase 3) - Already mostly exists, just extend
+
+Each phase is independently useful. Ship after each.
 
 ---
 
-## Future Considerations
-
-### v2.1: Enhanced Self-Healing
-- LLM-as-judge for code quality
-- Automatic rollback for failed fixes
-- Learning from successful fixes across projects
-
-### v2.2: Enterprise Features
-- Team-shared context and learnings
-- Audit logging for compliance
-- Role-based access control
-
-### v3.0: Multi-Agent Architecture
-- True parallel agent execution
-- Specialized agent personas
-- Distributed coordination
-
----
-
-## References & Research
-
-### Internal References
+## References
 
 - Current borg script: `borg:1-2934`
-- SPEC template: `templates/SPEC-template.md:1-160`
 - PROMPT template: `templates/PROMPT-template.md:1-585`
-- Backpressure docs: `docs/backpressure.md:1-240`
-- Prompting patterns: `docs/prompting-patterns.md:1-267`
-
-### External References
-
-- [Claude Code Best Practices](https://www.anthropic.com/engineering/claude-code-best-practices)
-- [Aider Lint & Test Patterns](https://aider.chat/docs/usage/lint-test)
-- [Ralph Wiggum Technique](https://ghuntley.com/ralph/)
-- [Backpressure in AI Workflows](https://ghuntley.com/pressure/)
-- [LangGraph Checkpointing](https://docs.langchain.com/oss/python/langchain/human-in-the-loop)
-
-### Curated Skills Referenced
-
-- agent-native-architecture skill
-- agent-execution-patterns reference
-- file-todos skill
-- compound-engineering workflows
-
----
-
-## Implementation Notes
-
-### Phased Rollout Strategy
-
-1. **Phase 1-2** can ship as v2.0-alpha (modular + context)
-2. **Phase 3-4** as v2.0-beta (self-healing + reuse)
-3. **Phase 5-7** as v2.0-rc (gates + schema + metrics)
-4. **Phase 8** as v2.1 (multi-agent coordination)
-
-### Testing Strategy
-
-- Unit tests with Bats for each module
-- Integration tests for full loop execution
-- Snapshot tests for SPEC parsing
-- Chaos testing for self-healing (inject errors)
-
-### Migration Path
-
-1. Existing users run `borg upgrade`
-2. Old `.borg/` structure migrated automatically
-3. Existing SPECs validated and repaired if needed
-4. Learnings preserved in new context format
+- Existing learnings logic: `borg:1847-1892` (`add_learning`, `get_learnings_summary`)
+- Existing retry logic: `borg:312-398` (`run_claude_with_retry`)
+- Existing project discovery: `borg:1425-1583` (`discover_project`, `detect_project_type`)
