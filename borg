@@ -2577,12 +2577,40 @@ TARGET URL: $design_url
 SPEC FILE: $abs_spec_dir/SPEC.md
 
 INSTRUCTIONS:
-1. First, load the /frontend-design skill to apply its philosophy:
-   Use: skill: frontend-design
 
-2. Take a screenshot of $design_url using agent-browser
+## Step 1: Discover All Pages
 
-3. Apply the /frontend-design skill philosophy to critique the design:
+First, crawl the site to find all pages:
+
+\`\`\`bash
+# Open the base URL
+agent-browser open $design_url
+
+# Get all navigation links (look for nav, header, footer links)
+agent-browser execute \"Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a')).map(a => a.href).filter(h => h.startsWith(window.location.origin))\"
+\`\`\`
+
+Build a list of unique pages to review. Include at minimum:
+- Homepage ($design_url)
+- All pages linked from main navigation
+- Any pages linked in footer
+
+## Step 2: Screenshot Each Page
+
+For EACH discovered page:
+\`\`\`bash
+agent-browser open [page-url]
+agent-browser screenshot [page-name].png
+\`\`\`
+
+## Step 3: Load Design Skill
+
+Load the /frontend-design skill to apply its philosophy:
+Use: skill: frontend-design
+
+## Step 4: Review ALL Pages
+
+Apply the /frontend-design skill philosophy to critique EACH page:
 
    DISTINCTIVE vs GENERIC - Ask yourself:
    - Does this look like every other AI-generated site? (Bad)
@@ -2624,12 +2652,13 @@ INSTRUCTIONS:
 
    Name files like: 001-p2-bland-hero.md, 002-p2-weak-typography.md
 
-5. Use this format:
+5. Use this format (note: include PAGE where issue was found):
 ---
 priority: p2
 tags: [design, ui, frontend-design]
 spec: $spec_name
 type: design
+page: [url of page where issue found]
 ---
 # [Issue Title]
 
@@ -2637,6 +2666,7 @@ type: design
 [What's wrong - reference specific /frontend-design principles violated]
 
 ## Findings
+- Page: \`[full URL of the page]\`
 - File: \`path/to/component.tsx\`
 - Screenshot: [describe what you see]
 - Principle violated: [e.g., 'Generic color palette with too much gray']
@@ -2648,8 +2678,17 @@ type: design
 ## Acceptance Criteria
 - [ ] [Specific visual outcome that would satisfy /frontend-design standards]
 
+## Pages Summary
+
+After reviewing ALL pages, provide a summary:
+- Total pages reviewed: [N]
+- Pages with issues: [list]
+- Global issues (affect all pages): [list]
+- Page-specific issues: [list by page]
+
 IMPORTANT: Be opinionated. The /frontend-design skill demands distinctive, memorable design.
-Don't accept 'good enough' - push for design that has craft and personality."
+Don't accept 'good enough' - push for design that has craft and personality.
+Review EVERY page discovered, not just the homepage."
 
             echo "$design_review_prompt" | claude --dangerously-skip-permissions --print
             echo ""
@@ -3218,36 +3257,74 @@ cmd_design() {
 TARGET URL: $url
 
 INSTRUCTIONS:
-1. First, take a screenshot of the current state:
-   Use agent-browser to screenshot $url
 
-2. Analyze the current design:
-   - Is it bland, generic, or 'AI-looking'?
-   - What specific elements need improvement?
-   - What's the overall visual hierarchy?
+## Step 1: Discover All Pages (First iteration only)
 
-3. Apply the /frontend-design skill philosophy:
-   - Create DISTINCTIVE design, not generic templates
-   - Use bold, intentional choices (not safe defaults)
-   - Consider: typography, color, spacing, visual rhythm
-   - Add personality and craft
+If this is iteration 1, crawl the site to find all pages:
 
-4. Make improvements to the code:
-   - Focus on CSS/styling changes
-   - Improve one section or component per iteration
-   - Run any build/dev commands if needed
+\`\`\`bash
+# Open the base URL
+agent-browser open $url
 
-5. Take an 'after' screenshot to verify improvement
+# Get all navigation links
+agent-browser execute \"Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a')).map(a => a.href).filter(h => h.startsWith(window.location.origin))\"
+\`\`\`
 
-6. If design is now polished and distinctive (not bland):
-   Output: <design-complete>Design polished.</design-complete>
+Build a list of unique pages to improve. Store this list for subsequent iterations.
+
+## Step 2: Screenshot Current State (ALL Pages)
+
+For EACH page discovered:
+\`\`\`bash
+agent-browser open [page-url]
+agent-browser screenshot before-iter$iteration-[page-name].png
+\`\`\`
+
+## Step 3: Analyze ALL Pages
+
+For each page, evaluate:
+- Is it bland, generic, or 'AI-looking'?
+- What specific elements need improvement?
+- What's the overall visual hierarchy?
+- Is there consistency across pages?
+
+## Step 4: Apply /frontend-design Skill Philosophy
+
+Apply to ALL pages:
+- Create DISTINCTIVE design, not generic templates
+- Use bold, intentional choices (not safe defaults)
+- Consider: typography, color, spacing, visual rhythm
+- Add personality and craft
+- Ensure visual consistency across all pages
+
+## Step 5: Make Improvements
+
+Focus on changes that affect multiple pages first (global styles):
+- Shared CSS/styling changes
+- Component improvements that appear on multiple pages
+- Then page-specific improvements
+- Run any build/dev commands if needed
+
+## Step 6: Screenshot After State (ALL Pages)
+
+For EACH page:
+\`\`\`bash
+agent-browser open [page-url]
+agent-browser screenshot after-iter$iteration-[page-name].png
+\`\`\`
+
+## Step 7: Evaluate Completion
+
+If ALL pages are now polished and distinctive (not bland):
+Output: <design-complete>Design polished.</design-complete>
 
 IMPORTANT:
-- Each iteration should make VISIBLE improvement
+- Each iteration should make VISIBLE improvement across ALL pages
 - Don't just add subtle tweaks - make bold changes
-- The goal is distinctive, memorable design
+- The goal is distinctive, memorable design on EVERY page
 - Avoid: gray backgrounds, generic shadows, safe color choices
 - Embrace: bold typography, intentional whitespace, personality
+- Ensure consistency: same design language across all pages
 
 Start by taking a screenshot of $url"
 
@@ -3423,8 +3500,9 @@ COMMANDS:
 
     review [spec]       Run comprehensive code review (spec-aware)
         [--design]      Include design review (requires dev server)
-        [--design-only] Only run design review
+        [--design-only] Only run design review (crawls ALL pages)
         [--url URL]     Specify dev server URL for design review
+                        Discovers all pages via nav/footer links
                         Saves todos to: specs/<feature>/todos/code/
                                     or: specs/<feature>/todos/design/
 
@@ -3437,6 +3515,7 @@ COMMANDS:
     design [url]        Proactive design improvement loop
         [iterations]    Number of iterations (default: 5)
                         Auto-detects dev server if no URL
+                        Discovers and improves ALL pages (nav, footer links)
                         Uses /frontend-design skill for distinctive UI
                         Saves screenshots to design-iterations/
 
