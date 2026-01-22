@@ -32,18 +32,40 @@ ln -s ~/Desktop/coding-projects/compound-ralph/cr /usr/local/bin/cr
 
 ### Prerequisites
 
-1. **Claude Code CLI** - [Install from claude.ai](https://claude.ai/code)
-
-2. **Ralph Wiggum Plugin** (optional, for internal loop mode):
+1. **Git** - Version control (usually pre-installed)
    ```bash
-   claude "/plugin install ralph-wiggum@claude-plugins-official"
+   git --version  # Verify installation
    ```
 
-3. **Compound Engineering Plugin** (for rich planning):
+2. **Claude Code CLI** - [Install from claude.ai](https://claude.ai/code)
    ```bash
-   claude "/plugin marketplace add https://github.com/your-marketplace"
+   claude --version  # Verify installation
+   ```
+
+3. **Compound Engineering Plugin** - Planning workflows and design skills:
+   ```bash
+   claude "/plugin marketplace add https://github.com/EveryInc/compound-engineering-plugin"
    claude "/plugin install compound-engineering"
    ```
+
+   Provides: `/workflows:plan`, `/deepen-plan`, `/workflows:review`, `/frontend-design` skill
+
+4. **Vercel agent-browser CLI** - Browser automation for screenshots and visual testing:
+   ```bash
+   npm install -g agent-browser
+   agent-browser install  # Downloads Chromium
+   ```
+
+   Basic usage:
+   ```bash
+   agent-browser open http://localhost:3000  # Navigate to page
+   agent-browser screenshot page.png          # Capture screenshot
+   agent-browser snapshot                     # Get interactive elements
+   agent-browser click @e1                    # Click element by ref
+   agent-browser close                        # Close browser
+   ```
+
+   See [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser) for full documentation.
 
 ## Quick Start
 
@@ -389,16 +411,17 @@ This is by design! Each iteration has fresh context. Information persists via:
 - Git history (changes)
 - Notes section (learnings)
 
-## Sources & Attribution
+## Sources & Inspiration
 
-This tool is built on ideas from:
+This tool implements the Ralph Loop technique natively in bash, inspired by:
 
-- [Geoffrey Huntley's Ralph Wiggum Technique](https://ghuntley.com/ralph/)
+- [Geoffrey Huntley's Ralph Wiggum Technique](https://ghuntley.com/ralph/) - The original concept
 - [Backpressure in AI Workflows](https://ghuntley.com/pressure/)
 - [The Ralph Wiggum Playbook](https://paddo.dev/blog/ralph-wiggum-playbook/)
-- [Official Anthropic Ralph Wiggum Plugin](https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum)
 - [frankbria's Enhanced Implementation](https://github.com/frankbria/ralph-claude-code)
 - [Don't Waste Your Backpressure](https://banay.me/dont-waste-your-backpressure/)
+
+Note: This project does **not** use the [official ralph-wiggum plugin](https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum) - it implements its own loop by calling `claude --dangerously-skip-permissions --print` directly.
 
 ## License
 

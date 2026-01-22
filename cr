@@ -14,9 +14,12 @@
 #   cr help                          Show this help
 #
 # Requirements:
-#   - Claude Code CLI (claude)
-#   - ralph-wiggum plugin: /plugin install ralph-wiggum@claude-plugins-official
-#   - compound-engineering plugin
+#   - git (version control)
+#   - Claude Code CLI (claude) - https://claude.ai/code
+#   - compound-engineering plugin:
+#       /plugin marketplace add https://github.com/EveryInc/compound-engineering-plugin
+#       /plugin install compound-engineering
+#   - Vercel agent-browser CLI: npm install -g agent-browser && agent-browser install
 #
 # Philosophy:
 #   Planning is human-guided and rich. Implementation is autonomous and focused.
@@ -3622,10 +3625,11 @@ PHILOSOPHY:
     Each iteration: fresh context + file-based state.
     Backpressure (tests, lint) lets agents self-correct.
 
-SOURCES:
-    https://ghuntley.com/ralph/
-    https://ghuntley.com/pressure/
-    https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum
+INSPIRATION:
+    https://ghuntley.com/ralph/ (original Ralph technique)
+    https://ghuntley.com/pressure/ (backpressure concepts)
+
+    Note: This tool implements its own loop - does not use the ralph-wiggum plugin.
 
 HELP
 }
