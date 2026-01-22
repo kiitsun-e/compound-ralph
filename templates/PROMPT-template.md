@@ -3,9 +3,9 @@
 You are in a fully autonomous implementation loop. Each iteration has fresh context.
 Your state persists through these files (all in repo):
 - `SPEC.md` - Tasks, requirements, notes
-- `.borg/project.json` - Discovered commands and config
-- `.borg/learnings.json` - Learnings from previous iterations
-- `.borg/context.yaml` - Accumulated context (learnings, error fixes, patterns)
+- `.cr/project.json` - Discovered commands and config
+- `.cr/learnings.json` - Learnings from previous iterations
+- `.cr/context.yaml` - Accumulated context (learnings, error fixes, patterns)
 - `git commits` - Code changes
 
 **This loop handles EVERYTHING:** empty repos, existing projects, any tech stack.
@@ -19,19 +19,19 @@ You discover what exists, create what's missing, and verify it actually works.
 
 Before anything else, understand what you're working with.
 
-### 0.0 Read Borg Context (if exists)
+### 0.0 Read Compound Ralph Context (if exists)
 
-Check for existing borg context from previous iterations:
+Check for existing Compound Ralph context from previous iterations:
 
 ```bash
 # Check for project config (discovered commands)
-[ -f ".borg/project.json" ] && cat .borg/project.json
+[ -f ".cr/project.json" ] && cat .cr/project.json
 
 # Check for learnings from previous iterations
-[ -f ".borg/learnings.json" ] && cat .borg/learnings.json
+[ -f ".cr/learnings.json" ] && cat .cr/learnings.json
 ```
 
-**If `.borg/project.json` exists**, use those commands instead of guessing:
+**If `.cr/project.json` exists**, use those commands instead of guessing:
 - `commands.test` - How to run tests
 - `commands.build` - How to build
 - `commands.db` - How to run migrations
@@ -415,7 +415,7 @@ Add learnings to SPEC.md Notes section:
 - Patterns discovered
 - Environment gotchas
 
-**Also update `.borg/learnings.json`** for machine-readable context:
+**Also update `.cr/learnings.json`** for machine-readable context:
 
 ```bash
 # If jq is available, append a learning
@@ -427,7 +427,7 @@ jq '.learnings += [{
   "category": "CATEGORY",
   "learning": "WHAT_YOU_LEARNED",
   "files": ["file1.ts", "file2.ts"]
-}]' .borg/learnings.json > .borg/learnings.json.tmp && mv .borg/learnings.json.tmp .borg/learnings.json
+}]' .cr/learnings.json > .cr/learnings.json.tmp && mv .cr/learnings.json.tmp .cr/learnings.json
 ```
 
 ### 8.3 Update Frontmatter

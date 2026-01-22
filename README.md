@@ -1,4 +1,4 @@
-# Ralph Borg
+# Compound Ralph
 
 Autonomous Feature Implementation System combining compound-engineering's rich planning with the Ralph Loop technique for iterative, self-correcting code generation.
 
@@ -6,7 +6,7 @@ Autonomous Feature Implementation System combining compound-engineering's rich p
 
 **Planning is human-guided and rich. Implementation is autonomous and focused.**
 
-Each unit of engineering work should make subsequent units easier. Ralph Borg achieves this by:
+Each unit of engineering work should make subsequent units easier. Compound Ralph achieves this by:
 
 1. **Rich Planning Phase** - Human + AI collaboration to create deeply researched specs
 2. **Autonomous Building Phase** - Loop executes one task per iteration with fresh context
@@ -17,17 +17,17 @@ Each unit of engineering work should make subsequent units easier. Ralph Borg ac
 
 ```bash
 # Clone or copy this directory
-cd ~/Desktop/coding-projects/ralph-borg
+cd ~/Desktop/coding-projects/compound-ralph
 
 # Make executable
-chmod +x borg
+chmod +x cr
 
 # Add to PATH (optional)
-echo 'export PATH="$PATH:$HOME/Desktop/coding-projects/ralph-borg"' >> ~/.zshrc
+echo 'export PATH="$PATH:$HOME/Desktop/coding-projects/compound-ralph"' >> ~/.zshrc
 source ~/.zshrc
 
 # Or create symlink
-ln -s ~/Desktop/coding-projects/ralph-borg/borg /usr/local/bin/borg
+ln -s ~/Desktop/coding-projects/compound-ralph/cr /usr/local/bin/cr
 ```
 
 ### Prerequisites
@@ -50,21 +50,21 @@ ln -s ~/Desktop/coding-projects/ralph-borg/borg /usr/local/bin/borg
 ```bash
 # 1. Initialize your project
 cd your-project
-borg init
+cr init
 
 # 2. Create a rich, researched plan (INTERACTIVE)
-borg plan "add user authentication with JWT"
+cr plan "add user authentication with JWT"
 # Claude will ask clarifying questions - answer them!
 # When satisfied, run /deepen-plan then exit
 
 # 3. Convert plan to SPEC format
-borg spec plans/add-user-authentication-with-jwt.md
+cr spec plans/add-user-authentication-with-jwt.md
 
 # 4. Edit SPEC.md to refine tasks and context
 # (This is your chance to guide the implementation)
 
 # 5. Start autonomous implementation (AUTONOMOUS)
-borg implement
+cr implement
 # Walk away - Claude works through tasks one by one
 ```
 
@@ -77,20 +77,20 @@ borg implement
 
 ## Commands
 
-### `borg init [path]`
+### `cr init [path]`
 
-Initialize a project for Ralph Borg.
+Initialize a project for Compound Ralph.
 
 - Creates `specs/` and `plans/` directories
 - Generates `AGENTS.md` with auto-detected build/test commands
 - Supports: bun, npm, yarn, pnpm, rails, python, go, rust
 
 ```bash
-borg init                    # Current directory
-borg init ~/projects/myapp   # Specific path
+cr init                    # Current directory
+cr init ~/projects/myapp   # Specific path
 ```
 
-### `borg plan <description>`
+### `cr plan <description>`
 
 Create and enrich a feature plan using compound-engineering workflows.
 
@@ -99,10 +99,10 @@ Create and enrich a feature plan using compound-engineering workflows.
 - Outputs to `plans/<feature-name>.md`
 
 ```bash
-borg plan "add dark mode toggle with system preference detection"
+cr plan "add dark mode toggle with system preference detection"
 ```
 
-### `borg spec <plan-file>`
+### `cr spec <plan-file>`
 
 Convert a plan to the SPEC.md format for autonomous implementation.
 
@@ -111,10 +111,10 @@ Convert a plan to the SPEC.md format for autonomous implementation.
 - Auto-detects quality gates based on project type
 
 ```bash
-borg spec plans/add-dark-mode-toggle.md
+cr spec plans/add-dark-mode-toggle.md
 ```
 
-### `borg implement [spec-dir]`
+### `cr implement [spec-dir]`
 
 Start the autonomous implementation loop.
 
@@ -125,17 +125,17 @@ Start the autonomous implementation loop.
 - Continues until completion or max iterations
 
 ```bash
-borg implement                        # Auto-find active spec
-borg implement specs/dark-mode/       # Specific spec
-MAX_ITERATIONS=100 borg implement     # Override max iterations
+cr implement                        # Auto-find active spec
+cr implement specs/dark-mode/       # Specific spec
+MAX_ITERATIONS=100 cr implement     # Override max iterations
 ```
 
-### `borg status`
+### `cr status`
 
 Show progress of all specs.
 
 ```bash
-borg status
+cr status
 # Output:
 # Spec                     Status      Iterations  Tasks
 # dark-mode               building    5           3/7
@@ -277,7 +277,7 @@ Each iteration follows this cycle:
 
 ### Auto-Detection
 
-Ralph Borg auto-detects your project type and sets appropriate quality gates:
+Compound Ralph auto-detects your project type and sets appropriate quality gates:
 
 | Project Type | Detection | Quality Gates |
 |-------------|-----------|---------------|
@@ -296,7 +296,7 @@ Ralph Borg auto-detects your project type and sets appropriate quality gates:
 | `RETRY_DELAY` | 5 | Initial retry delay (doubles with each retry) |
 
 ```bash
-MAX_ITERATIONS=100 ITERATION_DELAY=5 borg implement
+MAX_ITERATIONS=100 ITERATION_DELAY=5 cr implement
 ```
 
 ## Self-Healing
@@ -316,7 +316,7 @@ When an error occurs:
 
 ```bash
 # More aggressive retries for flaky connections
-MAX_RETRIES=5 RETRY_DELAY=10 borg implement
+MAX_RETRIES=5 RETRY_DELAY=10 cr implement
 ```
 
 ## Tips for Success

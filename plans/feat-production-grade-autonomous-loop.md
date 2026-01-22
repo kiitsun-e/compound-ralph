@@ -1,12 +1,12 @@
 # feat: Production-Grade Autonomous Development Loop
 
-> Transform ralph-borg into a fire-and-forget autonomous development system with context preservation, self-healing, and quality gates.
+> Transform compound-ralph into a fire-and-forget autonomous development system with context preservation, self-healing, and quality gates.
 
 ---
 
 ## Overview
 
-Ralph-borg works. The 2,934-line bash script successfully runs autonomous iteration loops. This plan adds three essential capabilities to achieve true "fire-and-forget after spec creation":
+Compound Ralph works. The 2,934-line bash script successfully runs autonomous iteration loops. This plan adds three essential capabilities to achieve true "fire-and-forget after spec creation":
 
 1. **Context Preservation** - Learnings persist across fresh Claude instances
 2. **Self-Healing** - Errors are automatically retried with context
@@ -20,7 +20,7 @@ No architectural rewrites. No module explosions. Surgical additions to what alre
 
 | Gap | Impact | Fix |
 |-----|--------|-----|
-| Context doesn't survive across runs | Fresh Claude repeats mistakes | Add `.borg/context.yaml` |
+| Context doesn't survive across runs | Fresh Claude repeats mistakes | Add `.cr/context.yaml` |
 | Errors stop the loop | Human must intervene | Add retry with error in prompt |
 | Quality gates aren't universal | Some stacks miss checks | Extend discovery for all stacks |
 
@@ -44,20 +44,20 @@ These were in the original plan. They're cut:
 
 ### Phase 1: Context Preservation
 
-**Goal:** Learnings survive across `borg implement` runs.
+**Goal:** Learnings survive across `cr implement` runs.
 
 #### Task 1: Create context file structure
 
-Add to `borg`:
+Add to `cr`:
 
 ```bash
 # Context file location
-CONTEXT_FILE=".borg/context.yaml"
+CONTEXT_FILE=".cr/context.yaml"
 
 init_context() {
   if [[ ! -f "$CONTEXT_FILE" ]]; then
     cat > "$CONTEXT_FILE" << 'EOF'
-# Ralph-borg accumulated context
+# Compound Ralph accumulated context
 # This file persists across iterations
 
 learnings: []
@@ -85,7 +85,7 @@ Edit `templates/PROMPT-template.md`:
 {{patterns_discovered}}
 ```
 
-Add to `borg` spec command:
+Add to `cr` spec command:
 
 ```bash
 inject_context() {
@@ -144,7 +144,7 @@ prune_context() {
 ```
 
 **Success criteria:**
-- [x] Context file created on `borg init`
+- [x] Context file created on `cr init`
 - [x] Context injected into PROMPT.md
 - [x] Learnings added after successful iterations
 - [x] Context stays under 100 entries total
@@ -400,7 +400,7 @@ Before writing ANY new code:
 
 | File | Change |
 |------|--------|
-| `borg` | +~150 lines (context, healing, gates) |
+| `cr` | +~150 lines (context, healing, gates) |
 | `templates/PROMPT-template.md` | +~30 lines (context injection, search-before-write) |
 
 **Total new code:** ~180 lines
@@ -449,10 +449,10 @@ Add to existing test workflow:
 ```bash
 # Test context persistence
 test_context_persistence() {
-  borg init /tmp/test-project
-  echo "learnings: ['test learning']" > /tmp/test-project/.borg/context.yaml
+  cr init /tmp/test-project
+  echo "learnings: ['test learning']" > /tmp/test-project/.cr/context.yaml
   # Verify context appears in generated PROMPT
-  borg spec /tmp/test-project/plans/test.md
+  cr spec /tmp/test-project/plans/test.md
   grep -q "test learning" /tmp/test-project/specs/test/PROMPT.md
 }
 
@@ -485,8 +485,8 @@ Each phase is independently useful. Ship after each.
 
 ## References
 
-- Current borg script: `borg:1-2934`
+- Current cr script: `cr:1-2934`
 - PROMPT template: `templates/PROMPT-template.md:1-585`
-- Existing learnings logic: `borg:1847-1892` (`add_learning`, `get_learnings_summary`)
-- Existing retry logic: `borg:312-398` (`run_claude_with_retry`)
-- Existing project discovery: `borg:1425-1583` (`discover_project`, `detect_project_type`)
+- Existing learnings logic: `cr:1847-1892` (`add_learning`, `get_learnings_summary`)
+- Existing retry logic: `cr:312-398` (`run_claude_with_retry`)
+- Existing project discovery: `cr:1425-1583` (`discover_project`, `detect_project_type`)

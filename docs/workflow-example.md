@@ -1,6 +1,6 @@
 # Complete Workflow Example
 
-This document walks through a complete feature implementation using Ralph Borg.
+This document walks through a complete feature implementation using Compound Ralph.
 
 ## Scenario
 
@@ -10,12 +10,12 @@ You want to add a "dark mode toggle" to your Bun/React application.
 
 ```bash
 cd ~/projects/my-app
-borg init
+cr init
 ```
 
 Output:
 ```
-=== Initializing Ralph Borg in /Users/marcus/projects/my-app ===
+=== Initializing Compound Ralph in /Users/marcus/projects/my-app ===
 
 [INFO] Detected project type: bun
 [SUCCESS] Created specs/ and plans/ directories
@@ -23,9 +23,9 @@ Output:
 
 Next steps:
   1. Review and customize AGENTS.md with your project's commands
-  2. Create a plan:    borg plan "your feature description"
-  3. Convert to spec:  borg spec plans/your-feature.md
-  4. Implement:        borg implement specs/your-feature/
+  2. Create a plan:    cr plan "your feature description"
+  3. Convert to spec:  cr spec plans/your-feature.md
+  4. Implement:        cr implement specs/your-feature/
 ```
 
 ## Step 2: Review AGENTS.md
@@ -64,7 +64,7 @@ Customize if needed (e.g., add `bun run test:e2e` if you have E2E tests).
 ## Step 3: Create Rich Plan
 
 ```bash
-borg plan "add dark mode toggle with system preference detection and localStorage persistence"
+cr plan "add dark mode toggle with system preference detection and localStorage persistence"
 ```
 
 This runs:
@@ -82,7 +82,7 @@ The plan is saved to `plans/add-dark-mode-toggle-with-system-preference-detectio
 ## Step 4: Convert to SPEC
 
 ```bash
-borg spec plans/add-dark-mode-toggle-with-system-preference-detection.md
+cr spec plans/add-dark-mode-toggle-with-system-preference-detection.md
 ```
 
 Creates:
@@ -177,13 +177,13 @@ to localStorage, and smoothly transitions between themes.
 ## Step 6: Start Implementation
 
 ```bash
-borg implement
+cr implement
 ```
 
 The loop begins:
 
 ```
-=== Starting Ralph Borg Loop ===
+=== Starting Compound Ralph Loop ===
 Spec:           specs/add-dark-mode-toggle-with-system-preference-detection/SPEC.md
 Max iterations: 50
 Delay:          3s between iterations
@@ -220,11 +220,11 @@ Press Ctrl+C to stop at any time.
 Check status anytime:
 
 ```bash
-borg status
+cr status
 ```
 
 ```
-=== Ralph Borg Status ===
+=== Compound Ralph Status ===
 
 Spec                                           Status      Iterations  Tasks
 ----                                           ------      ----------  -----

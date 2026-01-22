@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# borg - Ralph Borg: Autonomous Feature Implementation System
+# cr - Compound Ralph: Autonomous Feature Implementation System
 #
 # Combines compound-engineering's planning workflows with the Ralph Loop
 # technique for autonomous, iterative feature implementation.
 #
 # Usage:
-#   borg init [project-path]           Initialize a project for Ralph Borg
-#   borg plan <feature-description>    Create and deepen a plan
-#   borg spec <plan-file>              Convert plan to SPEC.md format
-#   borg implement [spec-dir]          Start autonomous implementation loop
-#   borg status                        Show progress of all specs
-#   borg help                          Show this help
+#   cr init [project-path]           Initialize a project for Compound Ralph
+#   cr plan <feature-description>    Create and deepen a plan
+#   cr spec <plan-file>              Convert plan to SPEC.md format
+#   cr implement [spec-dir]          Start autonomous implementation loop
+#   cr status                        Show progress of all specs
+#   cr help                          Show this help
 #
 # Requirements:
 #   - Claude Code CLI (claude)
@@ -39,8 +39,8 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-BORG_VERSION="2.0.0"
-BORG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CR_VERSION="2.0.0"
+CR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPECS_DIR="specs"
 PLANS_DIR="plans"
 MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
@@ -52,6 +52,15 @@ MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-3}"
 
 # Track consecutive failures
 CONSECUTIVE_FAILURES=0
+
+# Migration: .borg/ → .cr/ (one-time automatic migration)
+migrate_borg_to_cr() {
+    if [[ -d ".borg" ]] && [[ ! -d ".cr" ]]; then
+        log_warn "Migrating .borg/ to .cr/ (one-time migration)"
+        mv .borg .cr
+        log_success "Migration complete. Config now at .cr/"
+    fi
+}
 
 # Graceful shutdown handling
 SHUTDOWN_REQUESTED=false
@@ -72,7 +81,7 @@ cleanup_and_exit() {
     # Kill entire process group to catch any stragglers
     kill -TERM 0 2>/dev/null || true
 
-    log_info "Exiting. Resume with: borg implement"
+    log_info "Exiting. Resume with: cr implement"
     exit 130
 }
 trap cleanup_and_exit SIGINT SIGTERM
@@ -287,11 +296,11 @@ detect_project_type() {
 }
 
 # Discover project configuration by reading actual files
-# Creates/updates .borg/project.json with discovered settings
+# Creates/updates .cr/project.json with discovered settings
 discover_project() {
-    mkdir -p .borg
+    mkdir -p .cr
 
-    local config_file=".borg/project.json"
+    local config_file=".cr/project.json"
     local pkg_manager=""
     local test_cmd=""
     local test_e2e_cmd=""
@@ -447,11 +456,11 @@ EOF
     log_info "Project config saved to $config_file"
 }
 
-# Read a value from .borg/project.json
+# Read a value from .cr/project.json
 # Usage: get_project_config "commands.test"
 get_project_config() {
     local key="$1"
-    local config_file=".borg/project.json"
+    local config_file=".cr/project.json"
 
     if [[ ! -f "$config_file" ]]; then
         discover_project
@@ -469,7 +478,7 @@ get_project_config() {
 # Check if project config files have changed since last discovery
 # Returns 0 if changed (needs rediscovery), 1 if unchanged
 check_config_changed() {
-    local config_file=".borg/project.json"
+    local config_file=".cr/project.json"
 
     [[ ! -f "$config_file" ]] && return 0  # No config = needs discovery
 
@@ -512,7 +521,7 @@ run_iteration_checks() {
     local all_passed=true
 
     # Ensure project is discovered
-    if [[ ! -f ".borg/project.json" ]]; then
+    if [[ ! -f ".cr/project.json" ]]; then
         discover_project
     fi
 
@@ -577,7 +586,7 @@ run_iteration_checks() {
     fi
 }
 
-# Add a learning to .borg/learnings.json
+# Add a learning to .cr/learnings.json
 # Usage: add_learning "category" "learning text" "file1,file2"
 add_learning() {
     local category="$1"
@@ -586,8 +595,8 @@ add_learning() {
     local spec="${4:-unknown}"
     local iteration="${5:-0}"
 
-    mkdir -p .borg
-    local learnings_file=".borg/learnings.json"
+    mkdir -p .cr
+    local learnings_file=".cr/learnings.json"
 
     # Initialize if doesn't exist
     if [[ ! -f "$learnings_file" ]]; then
@@ -623,7 +632,7 @@ EOF
 get_learnings_summary() {
     local category="${1:-}"
     local limit="${2:-10}"
-    local learnings_file=".borg/learnings.json"
+    local learnings_file=".cr/learnings.json"
 
     [[ ! -f "$learnings_file" ]] && return
 
@@ -643,17 +652,17 @@ get_learnings_summary() {
 # CONTEXT PRESERVATION (Learnings persist across fresh Claude instances)
 #=============================================================================
 
-CONTEXT_FILE=".borg/context.yaml"
+CONTEXT_FILE=".cr/context.yaml"
 CONTEXT_MAX_LEARNINGS=50
 CONTEXT_MAX_ERRORS=20
 CONTEXT_MAX_PATTERNS=30
 
 # Initialize context file if it doesn't exist
 init_context() {
-    mkdir -p .borg
+    mkdir -p .cr
     if [[ ! -f "$CONTEXT_FILE" ]]; then
         cat > "$CONTEXT_FILE" << 'EOF'
-# Ralph-borg accumulated context
+# Compound Ralph accumulated context
 # This file persists across iterations and fresh Claude instances
 
 learnings: []
@@ -1036,7 +1045,7 @@ run_quality_gates() {
 #=============================================================================
 
 # Verify integration - ensure everything actually works
-# Discovery-based: reads commands from .borg/project.json
+# Discovery-based: reads commands from .cr/project.json
 # Returns 0 if all checks pass, 1 if any fail
 verify_integration() {
     INTEGRATION_FAILURES=()
@@ -1045,7 +1054,7 @@ verify_integration() {
     log_step "Verifying Integration"
 
     # Ensure project is discovered
-    if [[ ! -f ".borg/project.json" ]]; then
+    if [[ ! -f ".cr/project.json" ]]; then
         log_info "Discovering project configuration..."
         discover_project
     fi
@@ -1493,7 +1502,7 @@ cmd_init() {
     local project_path="${1:-.}"
     project_path="$(cd "$project_path" && pwd)"
 
-    log_step "Initializing Ralph Borg in $project_path"
+    log_step "Initializing Compound Ralph in $project_path"
 
     # Detect project type
     local project_type
@@ -1514,14 +1523,14 @@ cmd_init() {
     fi
 
     # Copy templates
-    if [[ -d "$BORG_DIR/templates" ]]; then
-        cp -n "$BORG_DIR/templates/SPEC-template.md" "$project_path/$SPECS_DIR/" 2>/dev/null || true
+    if [[ -d "$CR_DIR/templates" ]]; then
+        cp -n "$CR_DIR/templates/SPEC-template.md" "$project_path/$SPECS_DIR/" 2>/dev/null || true
         log_success "Copied SPEC template to specs/"
     fi
 
     # Initialize context file for cross-session learning
     (cd "$project_path" && init_context)
-    log_success "Initialized .borg/context.yaml for context preservation"
+    log_success "Initialized .cr/context.yaml for context preservation"
 
     # Discover project configuration
     (cd "$project_path" && discover_project)
@@ -1530,19 +1539,19 @@ cmd_init() {
     # Create .gitignore additions if needed
     if [[ -f "$project_path/.gitignore" ]]; then
         if ! grep -q "specs/.history" "$project_path/.gitignore" 2>/dev/null; then
-            echo -e "\n# Ralph Borg iteration logs\nspecs/.history/" >> "$project_path/.gitignore"
+            echo -e "\n# Compound Ralph iteration logs\nspecs/.history/" >> "$project_path/.gitignore"
             log_success "Added specs/.history/ to .gitignore"
         fi
     fi
 
     echo ""
-    log_success "Ralph Borg initialized!"
+    log_success "Compound Ralph initialized!"
     echo ""
     echo "Next steps:"
     echo "  1. Review and customize AGENTS.md with your project's commands"
-    echo "  2. Create a plan:    borg plan \"your feature description\""
-    echo "  3. Convert to spec:  borg spec plans/your-feature.md"
-    echo "  4. Implement:        borg implement specs/your-feature/"
+    echo "  2. Create a plan:    cr plan \"your feature description\""
+    echo "  3. Convert to spec:  cr spec plans/your-feature.md"
+    echo "  4. Implement:        cr implement specs/your-feature/"
     echo ""
 }
 
@@ -1554,7 +1563,7 @@ cmd_plan() {
     local description="$*"
 
     if [[ -z "$description" ]]; then
-        log_error "Usage: borg plan <feature-description>"
+        log_error "Usage: cr plan <feature-description>"
         exit 1
     fi
 
@@ -1592,7 +1601,7 @@ cmd_plan() {
     echo ""
     echo "Next steps:"
     echo "  1. Review the plan: ls plans/"
-    echo "  2. Convert to spec: borg spec plans/<plan-file>.md"
+    echo "  2. Convert to spec: cr spec plans/<plan-file>.md"
     echo ""
 }
 
@@ -1604,8 +1613,8 @@ cmd_spec() {
     local plan_file="$1"
 
     if [[ -z "$plan_file" ]] || [[ ! -f "$plan_file" ]]; then
-        log_error "Usage: borg spec <plan-file>"
-        log_error "Example: borg spec plans/user-authentication.md"
+        log_error "Usage: cr spec <plan-file>"
+        log_error "Example: cr spec plans/user-authentication.md"
         exit 1
     fi
 
@@ -1932,8 +1941,8 @@ EOF
     log_success "Created $spec_dir/SPEC.md"
 
     # Copy the PROMPT template or create inline
-    if [[ -f "$BORG_DIR/templates/PROMPT-template.md" ]]; then
-        cp "$BORG_DIR/templates/PROMPT-template.md" "$spec_dir/PROMPT.md"
+    if [[ -f "$CR_DIR/templates/PROMPT-template.md" ]]; then
+        cp "$CR_DIR/templates/PROMPT-template.md" "$spec_dir/PROMPT.md"
         log_success "Created $spec_dir/PROMPT.md (from template)"
     else
         # Fallback: create inline with enforced backpressure
@@ -2085,7 +2094,7 @@ PROMPT
     echo "Next steps:"
     echo "  1. Review: cat $spec_dir/SPEC.md"
     echo "  2. (Optional) Adjust tasks or add context if needed"
-    echo "  3. Implement: borg implement $spec_dir"
+    echo "  3. Implement: cr implement $spec_dir"
     echo ""
 }
 
@@ -2117,7 +2126,7 @@ cmd_implement() {
         fi
 
         if [[ -z "$spec_dir" ]]; then
-            log_error "No active spec found. Create one with: borg spec <plan-file>"
+            log_error "No active spec found. Create one with: cr spec <plan-file>"
             exit 1
         fi
     fi
@@ -2153,7 +2162,7 @@ cmd_implement() {
     init_context
     prune_context
 
-    log_step "Starting Ralph Borg Loop"
+    log_step "Starting Compound Ralph Loop"
     echo "Spec:           $spec_file"
     echo "Max iterations: $MAX_ITERATIONS"
     echo "Delay:          ${ITERATION_DELAY}s between iterations"
@@ -2199,7 +2208,7 @@ cmd_implement() {
                 echo ""
                 echo "Next steps:"
                 echo "  1. Review changes: git diff main"
-                echo "  2. Run code review: borg review"
+                echo "  2. Run code review: cr review"
                 echo "  3. Create PR when ready"
                 exit 0
             else
@@ -2231,7 +2240,7 @@ Before continuing with tasks, address these issues."
         fi
 
         local learnings_context=""
-        if [[ -f ".borg/learnings.json" ]]; then
+        if [[ -f ".cr/learnings.json" ]]; then
             local recent_learnings
             recent_learnings=$(get_learnings_summary "" 5 2>/dev/null)
             if [[ -n "$recent_learnings" ]]; then
@@ -2254,7 +2263,7 @@ $accumulated_context"
         fi
 
         # Create the iteration prompt
-        local iteration_prompt="You are in iteration $iteration of a Ralph Borg implementation loop.
+        local iteration_prompt="You are in iteration $iteration of a Compound Ralph implementation loop.
 
 CRITICAL INSTRUCTIONS:
 1. Read $abs_spec_dir/SPEC.md - this is your single source of truth
@@ -2305,7 +2314,7 @@ Start by reading both files now."
                 log_error "  - Network connectivity problems"
                 log_error "  - Rate limiting"
                 echo ""
-                log_info "Resume when ready: borg implement $spec_dir"
+                log_info "Resume when ready: cr implement $spec_dir"
                 exit 1
             fi
 
@@ -2365,8 +2374,8 @@ Start by reading both files now."
                 echo ""
                 echo "Next steps:"
                 echo "  1. Review changes: git diff main"
-                echo "  2. Run code review: borg review"
-                echo "  3. Fix any issues:  borg fix && borg implement"
+                echo "  2. Run code review: cr review"
+                echo "  3. Fix any issues:  cr fix && cr implement"
                 echo "  4. Document learnings: claude /workflows:compound"
                 echo "  5. Create PR when ready"
                 echo ""
@@ -2424,8 +2433,8 @@ Start by investigating the first failure: ${INTEGRATION_FAILURES[0]}"
     echo ""
     echo "Options:"
     echo "  1. Review SPEC.md to see current progress"
-    echo "  2. Run 'borg implement $spec_dir' to continue"
-    echo "  3. Increase MAX_ITERATIONS: MAX_ITERATIONS=100 borg implement $spec_dir"
+    echo "  2. Run 'cr implement $spec_dir' to continue"
+    echo "  3. Increase MAX_ITERATIONS: MAX_ITERATIONS=100 cr implement $spec_dir"
     echo ""
     exit 1
 }
@@ -2482,8 +2491,8 @@ cmd_review() {
         spec_dir=$(find_active_spec || true)
         if [[ -z "$spec_dir" ]]; then
             log_error "No active spec found."
-            log_error "Either specify a spec: borg review specs/my-feature/"
-            log_error "Or create one first:   borg spec plans/my-feature.md"
+            log_error "Either specify a spec: cr review specs/my-feature/"
+            log_error "Or create one first:   cr spec plans/my-feature.md"
             exit 1
         fi
     fi
@@ -2565,7 +2574,7 @@ Run the review now."
 
         if [[ -z "$design_url" ]]; then
             log_warn "No dev server detected for design review."
-            log_warn "Start your dev server or use: borg review --design --url http://localhost:3000"
+            log_warn "Start your dev server or use: cr review --design --url http://localhost:3000"
         else
             log_info "Design review target: $design_url"
             log_info "Will discover ALL pages (nav, header, footer links)"
@@ -2720,12 +2729,12 @@ Review EVERY page discovered, not just the homepage."
     echo ""
     echo "Next steps:"
     echo "  1. View findings:    ls $spec_dir/todos/"
-    [[ $code_count -gt 0 ]] && echo "  2. Fix code issues:  borg fix code"
-    [[ $design_count -gt 0 ]] && echo "  3. Fix design:       borg fix design"
-    echo "  4. Fix all:          borg fix"
+    [[ $code_count -gt 0 ]] && echo "  2. Fix code issues:  cr fix code"
+    [[ $design_count -gt 0 ]] && echo "  3. Fix design:       cr fix design"
+    echo "  4. Fix all:          cr fix"
     if [[ "$review_type" == "code" ]]; then
         echo ""
-        echo "  Run design review:   borg review --design"
+        echo "  Run design review:   cr review --design"
     fi
     echo ""
 }
@@ -2738,7 +2747,7 @@ cmd_fix() {
     local fix_type=""
     local spec_dir=""
 
-    # Parse arguments: borg fix [code|design] [spec-dir]
+    # Parse arguments: cr fix [code|design] [spec-dir]
     while [[ $# -gt 0 ]]; do
         case "$1" in
             code|design)
@@ -2751,7 +2760,7 @@ cmd_fix() {
                     spec_dir="$1"
                 else
                     log_error "Unknown argument or directory not found: $1"
-                    log_error "Usage: borg fix [code|design] [spec-dir]"
+                    log_error "Usage: cr fix [code|design] [spec-dir]"
                     exit 1
                 fi
                 shift
@@ -2764,7 +2773,7 @@ cmd_fix() {
         spec_dir=$(find_active_spec || true)
         if [[ -z "$spec_dir" ]]; then
             log_error "No active spec found."
-            log_error "Specify a spec: borg fix specs/my-feature/"
+            log_error "Specify a spec: cr fix specs/my-feature/"
             exit 1
         fi
     fi
@@ -2817,8 +2826,8 @@ cmd_fix() {
         log_warn "No todos found to fix."
         echo ""
         echo "Run a review first:"
-        echo "  borg review              # Code review"
-        echo "  borg review --design     # Design review"
+        echo "  cr review              # Code review"
+        echo "  cr review --design     # Design review"
         exit 1
     fi
 
@@ -2988,7 +2997,7 @@ $spec_name
 ### Notes
 
 These fixes originated from ${fix_type_label} review of $spec_name.
-Re-run \`borg review\` after fixes to verify issues are resolved.
+Re-run \`cr review\` after fixes to verify issues are resolved.
 
 ## Iteration Log
 
@@ -3088,13 +3097,13 @@ FIXPROMPT
     echo ""
     echo "Next steps:"
     echo "  1. Review the spec: cat $fix_dir/SPEC.md"
-    echo "  2. Implement fixes: borg implement $fix_dir"
+    echo "  2. Implement fixes: cr implement $fix_dir"
     echo ""
 }
 
 # Legacy alias for backwards compatibility
 cmd_spec_from_todos() {
-    log_warn "spec-from-todos is deprecated. Use 'borg fix' instead."
+    log_warn "spec-from-todos is deprecated. Use 'cr fix' instead."
     log_info "Converting to new format..."
     echo ""
 
@@ -3102,9 +3111,9 @@ cmd_spec_from_todos() {
     # This won't work perfectly but gives users guidance
     log_error "Please use the new workflow:"
     echo ""
-    echo "  1. Run review on a spec:  borg review specs/my-feature/"
-    echo "  2. Create fix spec:       borg fix code"
-    echo "  3. Implement fixes:       borg implement"
+    echo "  1. Run review on a spec:  cr review specs/my-feature/"
+    echo "  2. Create fix spec:       cr fix code"
+    echo "  3. Implement fixes:       cr implement"
     echo ""
     exit 1
 }
@@ -3114,10 +3123,10 @@ cmd_spec_from_todos() {
 #=============================================================================
 
 detect_dev_server() {
-    # 1. Check .borg/project.json for configured dev_url first
-    if [[ -f ".borg/project.json" ]] && command -v jq &>/dev/null; then
+    # 1. Check .cr/project.json for configured dev_url first
+    if [[ -f ".cr/project.json" ]] && command -v jq &>/dev/null; then
         local stored_url
-        stored_url=$(jq -r '.dev_url // empty' .borg/project.json 2>/dev/null)
+        stored_url=$(jq -r '.dev_url // empty' .cr/project.json 2>/dev/null)
         if [[ -n "$stored_url" ]] && curl -s --connect-timeout 1 "$stored_url" > /dev/null 2>&1; then
             echo "$stored_url"
             return 0
@@ -3205,7 +3214,7 @@ cmd_design() {
                 ;;
             -*)
                 log_error "Unknown option: $1"
-                log_error "Usage: borg design [url] [--n iterations]"
+                log_error "Usage: cr design [url] [--n iterations]"
                 exit 1
                 ;;
             *)
@@ -3225,8 +3234,8 @@ cmd_design() {
         url=$(detect_dev_server)
         if [[ -z "$url" ]]; then
             log_error "No dev server detected. Start your dev server or provide a URL:"
-            log_error "  borg design http://localhost:3000"
-            log_error "  borg design http://localhost:5173 10"
+            log_error "  cr design http://localhost:3000"
+            log_error "  cr design http://localhost:5173 10"
             exit 1
         fi
         log_success "Found dev server at $url"
@@ -3388,7 +3397,7 @@ Start by taking a screenshot of $url"
                 echo ""
                 echo "Next steps:"
                 echo "  1. Review the changes: git diff"
-                echo "  2. Run code review: borg review"
+                echo "  2. Run code review: cr review"
                 echo "  3. Commit if satisfied: git add -A && git commit -m 'style: polish UI design'"
                 echo ""
                 exit 0
@@ -3404,9 +3413,9 @@ Start by taking a screenshot of $url"
     log_warn "Completed $iterations design iterations."
     echo ""
     echo "The design may need more work. Options:"
-    echo "  1. Run more iterations: borg design $url 5"
+    echo "  1. Run more iterations: cr design $url 5"
     echo "  2. Review changes: git diff"
-    echo "  3. Run code review: borg review --design"
+    echo "  3. Run code review: cr review --design"
     echo ""
 }
 
@@ -3415,10 +3424,10 @@ Start by taking a screenshot of $url"
 #=============================================================================
 
 cmd_status() {
-    log_step "Ralph Borg Status"
+    log_step "Compound Ralph Status"
 
     if [[ ! -d "$SPECS_DIR" ]]; then
-        log_warn "No specs directory found. Run 'borg init' first."
+        log_warn "No specs directory found. Run 'cr init' first."
         exit 0
     fi
 
@@ -3478,8 +3487,8 @@ cmd_learnings() {
 
     log_step "Project Learnings"
 
-    if [[ ! -f ".borg/learnings.json" ]]; then
-        log_warn "No learnings found. Run 'borg implement' to generate learnings."
+    if [[ ! -f ".cr/learnings.json" ]]; then
+        log_warn "No learnings found. Run 'cr implement' to generate learnings."
         exit 0
     fi
 
@@ -3495,7 +3504,7 @@ cmd_learnings() {
 
     echo ""
     echo "Categories: environment, pattern, gotcha, fix, discovery, iteration_failure"
-    echo "Usage: borg learnings [category] [limit]"
+    echo "Usage: cr learnings [category] [limit]"
 }
 
 #=============================================================================
@@ -3504,17 +3513,17 @@ cmd_learnings() {
 
 cmd_help() {
     cat << HELP
-Ralph Borg - Autonomous Feature Implementation System
-Version: $BORG_VERSION
+Compound Ralph - Autonomous Feature Implementation System
+Version: $CR_VERSION
 
 Combines compound-engineering's rich planning with the Ralph Loop technique
 for autonomous, iterative feature implementation.
 
 USAGE:
-    borg <command> [arguments]
+    cr <command> [arguments]
 
 COMMANDS:
-    init [path]         Initialize a project for Ralph Borg
+    init [path]         Initialize a project for Compound Ralph
                         Creates specs/, plans/, AGENTS.md
                         Auto-detects project type (bun, npm, rails, python, etc.)
 
@@ -3557,7 +3566,7 @@ COMMANDS:
 
     status              Show progress of all specs (including fixes)
 
-    learnings [cat]     View project learnings from .borg/learnings.json
+    learnings [cat]     View project learnings from .cr/learnings.json
         [limit]         Number of entries to show (default: 20)
                         Categories: environment, pattern, gotcha, fix, discovery
 
@@ -3579,18 +3588,18 @@ SPEC STRUCTURE (after review):
             └── SPEC.md
 
 WORKFLOW:
-    1. borg init                           # Initialize project
-    2. borg plan "add user auth"           # Create rich plan
-    3. borg spec plans/add-user-auth.md    # Convert to spec
-    4. borg implement                      # Build feature
-    5. borg design                         # Polish UI (optional)
-    6. borg review                         # Code review → todos/code/
-    7. borg review --design                # Design review → todos/design/
-    8. borg fix code                       # Create fix spec for code
-    9. borg implement                      # Fix code issues
-   10. borg fix design                     # Create fix spec for design
-   11. borg implement                      # Fix design issues
-   12. borg review                         # Verify clean
+    1. cr init                           # Initialize project
+    2. cr plan "add user auth"           # Create rich plan
+    3. cr spec plans/add-user-auth.md    # Convert to spec
+    4. cr implement                      # Build feature
+    5. cr design                         # Polish UI (optional)
+    6. cr review                         # Code review → todos/code/
+    7. cr review --design                # Design review → todos/design/
+    8. cr fix code                       # Create fix spec for code
+    9. cr implement                      # Fix code issues
+   10. cr fix design                     # Create fix spec for design
+   11. cr implement                      # Fix design issues
+   12. cr review                         # Verify clean
 
 ENVIRONMENT VARIABLES:
     MAX_ITERATIONS      Maximum loop iterations (default: 50)
@@ -3605,7 +3614,7 @@ RESILIENCE:
     - Visible retry logging shows progress during failures
     - Consecutive failure limit prevents infinite loops
     - Graceful Ctrl+C handling for clean exits
-    - Auto-resume: just run 'borg implement' again
+    - Auto-resume: just run 'cr implement' again
 
 PHILOSOPHY:
     Planning is human-guided and rich.
@@ -3627,6 +3636,7 @@ HELP
 
 main() {
     check_prerequisites
+    migrate_borg_to_cr
 
     local command="${1:-help}"
     shift || true
@@ -3667,11 +3677,11 @@ main() {
             cmd_help
             ;;
         version|--version|-v)
-            echo "Ralph Borg v$BORG_VERSION"
+            echo "Compound Ralph v$CR_VERSION"
             ;;
         *)
             log_error "Unknown command: $command"
-            echo "Run 'borg help' for usage."
+            echo "Run 'cr help' for usage."
             exit 1
             ;;
     esac
