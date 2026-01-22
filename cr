@@ -2358,7 +2358,8 @@ Start by reading both files now."
         fi
 
         # Check for completion signal in log (support both old and new format)
-        if grep -qE "<loop-complete>|<promise>COMPLETE</promise>" "$log_file"; then
+        # Match the FULL tag with closing to avoid false positives like "Not outputting `<loop-complete>`"
+        if grep -qE "<loop-complete>.*</loop-complete>|<promise>COMPLETE</promise>" "$log_file"; then
             echo ""
             log_info "Claude signals completion. Verifying integration..."
 
@@ -2489,14 +2490,42 @@ cmd_review() {
 
     log_step "Running $review_label"
 
-    # Find spec if not provided
+    # Find spec if not provided, or create a default one for standalone reviews
+    local standalone_review=false
     if [[ -z "$spec_dir" ]] || [[ ! -d "$spec_dir" ]]; then
         spec_dir=$(find_active_spec || true)
         if [[ -z "$spec_dir" ]]; then
-            log_error "No active spec found."
-            log_error "Either specify a spec: cr review specs/my-feature/"
-            log_error "Or create one first:   cr spec plans/my-feature.md"
-            exit 1
+            # No spec found - create a default review location
+            standalone_review=true
+            spec_dir="specs/_reviews"
+            mkdir -p "$spec_dir"
+
+            # Create a minimal SPEC.md if it doesn't exist
+            if [[ ! -f "$spec_dir/SPEC.md" ]]; then
+                cat > "$spec_dir/SPEC.md" << 'SPEC_EOF'
+# Standalone Reviews
+
+This spec is auto-created for running `cr review` without a specific spec context.
+
+Review findings are stored here when no active spec is specified.
+
+## Usage
+
+Run reviews:
+```bash
+cr review              # Code review
+cr review --design     # Code + design review
+cr review --design-only # Design review only
+```
+
+Findings are saved to:
+- `todos/code/` - Code review findings
+- `todos/design/` - Design review findings
+SPEC_EOF
+                log_info "Created standalone review spec at $spec_dir/"
+                log_info "Note: Specify a spec for feature-specific reviews: cr review specs/my-feature/"
+                echo ""
+            fi
         fi
     fi
 
@@ -2508,7 +2537,12 @@ cmd_review() {
 
     local spec_name
     spec_name=$(basename "$spec_dir")
-    log_info "Reviewing spec: $spec_name"
+
+    if [[ "$standalone_review" == "true" ]]; then
+        log_info "Running standalone review (no spec context)"
+    else
+        log_info "Reviewing spec: $spec_name"
+    fi
 
     # Get absolute path for spec
     local abs_spec_dir
@@ -2526,7 +2560,44 @@ cmd_review() {
         log_info "Findings will be saved to: $spec_name/todos/code/"
         echo ""
 
-        local code_review_prompt="You are reviewing code changes for the spec: $spec_name
+        local code_review_prompt
+        if [[ "$standalone_review" == "true" ]]; then
+            code_review_prompt="You are reviewing code changes in this repository.
+
+This is a standalone review (no specific feature spec).
+Review the current git diff and recent changes for issues.
+
+Run /workflows:review to perform comprehensive code review.
+
+IMPORTANT: Save all todo files to this directory:
+$code_todos_dir/
+
+Name files like: 001-p1-issue-name.md, 002-p2-issue-name.md, etc.
+
+Use this format for todos:
+---
+priority: p1|p2|p3
+tags: [security|performance|architecture|etc]
+spec: standalone
+type: code
+---
+# [Issue Title]
+
+## Problem Statement
+[What's wrong]
+
+## Findings
+- File: \`path/to/file.ts:line\`
+
+## Recommended Action
+[How to fix]
+
+## Acceptance Criteria
+- [ ] [Specific outcome]
+
+Run the review now."
+        else
+            code_review_prompt="You are reviewing code changes for the spec: $spec_name
 
 SPEC FILE: $abs_spec_dir/SPEC.md
 
@@ -2559,6 +2630,7 @@ type: code
 - [ ] [Specific outcome]
 
 Run the review now."
+        fi
 
         echo "$code_review_prompt" | claude --dangerously-skip-permissions --print
         echo ""
@@ -2579,15 +2651,39 @@ Run the review now."
             log_warn "No dev server detected for design review."
             log_warn "Start your dev server or use: cr review --design --url http://localhost:3000"
         else
+            # Create screenshots directory for this review session
+            local review_screenshots_dir="design-reviews"
+            mkdir -p "$review_screenshots_dir"
+            local review_timestamp
+            review_timestamp=$(date '+%Y%m%d-%H%M%S')
+            local review_session_dir="$review_screenshots_dir/$review_timestamp"
+            mkdir -p "$review_session_dir"
+
             log_info "Design review target: $design_url"
             log_info "Will discover ALL pages (nav, header, footer links)"
+            log_info "Screenshots will be saved to: $review_session_dir/"
             log_info "Findings will be saved to: $spec_name/todos/design/"
             echo ""
 
-            local design_review_prompt="You are reviewing UI design for the spec: $spec_name
+            local design_review_prompt
+            local design_context
+            local design_spec_tag
+
+            if [[ "$standalone_review" == "true" ]]; then
+                design_context="You are reviewing UI design for this application.
+
+This is a standalone review (no specific feature spec)."
+                design_spec_tag="standalone"
+            else
+                design_context="You are reviewing UI design for the spec: $spec_name
+
+SPEC FILE: $abs_spec_dir/SPEC.md"
+                design_spec_tag="$spec_name"
+            fi
+
+            design_review_prompt="$design_context
 
 TARGET URL: $design_url
-SPEC FILE: $abs_spec_dir/SPEC.md
 
 INSTRUCTIONS:
 
@@ -2608,13 +2704,32 @@ Build a list of unique pages to review. Include at minimum:
 - All pages linked from main navigation
 - Any pages linked in footer
 
-## Step 2: Screenshot Each Page
+## Step 2: Screenshot Each Page at Multiple Viewports
 
-For EACH discovered page:
+SCREENSHOT DIRECTORY: $review_session_dir/
+
+For EACH discovered page, screenshot at MULTIPLE viewport widths to catch responsive issues:
 \`\`\`bash
 agent-browser open [page-url]
-agent-browser screenshot [page-name].png
+
+# Desktop (1920px)
+agent-browser resize 1920 1080
+agent-browser screenshot $review_session_dir/[page-name]-1920.png
+
+# Laptop (1440px)
+agent-browser resize 1440 900
+agent-browser screenshot $review_session_dir/[page-name]-1440.png
+
+# Tablet (1024px)
+agent-browser resize 1024 768
+agent-browser screenshot $review_session_dir/[page-name]-1024.png
+
+# Mobile (375px)
+agent-browser resize 375 812
+agent-browser screenshot $review_session_dir/[page-name]-375.png
 \`\`\`
+
+IMPORTANT: Always screenshot ALL viewport sizes. Responsive bugs (text compression, layout breaks) often only appear at specific widths.
 
 ## Step 3: Load Design Skill
 
@@ -2649,6 +2764,13 @@ Apply the /frontend-design skill philosophy to critique EACH page:
    - Generic grid without personality
    - Components feel disconnected
 
+   RESPONSIVE DESIGN - Check at ALL viewport sizes:
+   - Text compression or overflow at larger widths (1920px, 1440px)
+   - Layout breaks at specific breakpoints
+   - Elements that don't scale properly between sizes
+   - Content that becomes unreadable at mobile (375px)
+   - Max-width constraints that cause issues when maximized
+
    COMPONENTS - Identify:
    - Default/unstyled buttons, inputs, cards
    - No hover states or micro-interactions
@@ -2669,7 +2791,7 @@ Apply the /frontend-design skill philosophy to critique EACH page:
 ---
 priority: p2
 tags: [design, ui, frontend-design]
-spec: $spec_name
+spec: $design_spec_tag
 type: design
 page: [url of page where issue found]
 ---
@@ -2693,15 +2815,18 @@ page: [url of page where issue found]
 
 ## Pages Summary
 
-After reviewing ALL pages, provide a summary:
+After reviewing ALL pages at ALL viewport sizes, provide a summary:
 - Total pages reviewed: [N]
+- Viewport sizes tested: 1920px, 1440px, 1024px, 375px
 - Pages with issues: [list]
 - Global issues (affect all pages): [list]
 - Page-specific issues: [list by page]
+- Responsive issues: [list any layout/scaling problems at specific viewports]
 
 IMPORTANT: Be opinionated. The /frontend-design skill demands distinctive, memorable design.
 Don't accept 'good enough' - push for design that has craft and personality.
-Review EVERY page discovered, not just the homepage."
+Review EVERY page discovered at EVERY viewport size, not just the homepage at default size.
+Screenshots are saved to: $review_session_dir/"
 
             echo "$design_review_prompt" | claude --dangerously-skip-permissions --print
             echo ""
@@ -3204,20 +3329,25 @@ detect_dev_server() {
 
 cmd_design() {
     local url=""
-    local iterations=5
+    local max_iterations=50  # Safety limit
     local force_iterations=false
+    local continue_session=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --n)
-                iterations="$2"
+                max_iterations="$2"
                 force_iterations=true
                 shift 2
                 ;;
+            --continue)
+                continue_session=true
+                shift
+                ;;
             -*)
                 log_error "Unknown option: $1"
-                log_error "Usage: cr design [url] [--n iterations]"
+                log_error "Usage: cr design [url] [--n iterations] [--continue]"
                 exit 1
                 ;;
             *)
@@ -3252,19 +3382,20 @@ cmd_design() {
 
     echo ""
     echo "URL:        $url"
-    echo "Iterations: $iterations"
     if [[ "$force_iterations" == "true" ]]; then
-        echo "Mode:       Forced (will run all $iterations iterations)"
+        echo "Iterations: $max_iterations (forced)"
+        echo "Mode:       Forced (will run exactly $max_iterations iterations)"
+    elif [[ "$continue_session" == "true" ]]; then
+        echo "Mode:       Continue (resuming last session until all pages done)"
     else
-        echo "Mode:       Auto (exits early when design is polished)"
+        echo "Mode:       Auto (one page per iteration until all pages done)"
     fi
     echo ""
     echo "This will:"
     echo "  1. Discover ALL pages (nav, header, footer links)"
-    echo "  2. Screenshot every page found"
+    echo "  2. Fix ONE page per iteration"
     echo "  3. Apply /frontend-design skill for distinctive design"
-    echo "  4. Improve all pages with consistent design language"
-    echo "  5. Iterate $iterations times across all pages"
+    echo "  4. Continue until all pages are polished"
     echo ""
     echo "Press Ctrl+C to stop at any time."
     echo ""
@@ -3272,104 +3403,289 @@ cmd_design() {
     # Create design history directory
     local design_dir="design-iterations"
     mkdir -p "$design_dir"
-    local timestamp
-    timestamp=$(date '+%Y%m%d-%H%M%S')
-    local session_dir="$design_dir/$timestamp"
-    mkdir -p "$session_dir"
 
-    log_info "Design session: $session_dir"
-    echo ""
+    local session_dir=""
+    local state_file=""
+    local starting_iteration=0
 
-    local iteration=0
+    # Handle --continue: find and resume last session
+    if [[ "$continue_session" == "true" ]]; then
+        # Find the most recent session directory
+        local last_session
+        last_session=$(ls -1t "$design_dir" 2>/dev/null | head -1)
 
-    while [[ $iteration -lt $iterations ]]; do
+        if [[ -z "$last_session" ]] || [[ ! -d "$design_dir/$last_session" ]]; then
+            log_error "No previous session found to continue."
+            log_error "Run 'cr design' first to create a session."
+            exit 1
+        fi
+
+        session_dir="$design_dir/$last_session"
+        state_file="$session_dir/DESIGN-STATE.md"
+
+        if [[ ! -f "$state_file" ]]; then
+            log_error "No DESIGN-STATE.md found in $session_dir"
+            exit 1
+        fi
+
+        # Count existing iteration logs to determine starting point
+        local existing_iterations
+        existing_iterations=$(ls -1 "$session_dir"/*.md 2>/dev/null | grep -c "design.md" || echo "0")
+        starting_iteration=$existing_iterations
+
+        log_info "Continuing session: $session_dir"
+        log_info "Previous iterations: $starting_iteration"
+
+        # Count pending pages
+        local pending_count
+        pending_count=$(grep -c '^\- \[ \]' "$state_file" 2>/dev/null || echo "?")
+        local complete_count
+        complete_count=$(grep -c '^\- \[x\]' "$state_file" 2>/dev/null || echo "0")
+
+        log_info "Pages complete: $complete_count, Pages pending: $pending_count"
+        echo ""
+
+        # Show pending pages
+        local pending_pages
+        pending_pages=$(grep '^\- \[ \]' "$state_file" 2>/dev/null || true)
+        if [[ -n "$pending_pages" ]]; then
+            echo "Pending pages:"
+            echo "$pending_pages"
+            echo ""
+        fi
+    else
+        # Create new session
+        local timestamp
+        timestamp=$(date '+%Y%m%d-%H%M%S')
+        session_dir="$design_dir/$timestamp"
+        mkdir -p "$session_dir"
+
+        log_info "Design session: $session_dir"
+        echo ""
+
+        # Create persistent design state file
+        state_file="$session_dir/DESIGN-STATE.md"
+        cat > "$state_file" << 'STATE_EOF'
+# Design State
+
+This file tracks progress across design iterations. ONE page per iteration.
+
+## Pages to Update
+
+<!-- After discovering pages, list them here with checkboxes -->
+<!-- Example:
+- [ ] / (Landing page)
+- [ ] /login (Login page)
+- [ ] /about (About page)
+-->
+
+Pages not yet discovered. Run iteration 1 to crawl and populate this list.
+
+## Global Styles (Iteration 1)
+
+<!-- Document global CSS/component changes that affect all pages -->
+
+## Changes by Page
+
+<!-- Log what was changed for each page -->
+
+## Notes
+
+<!-- Any issues or observations -->
+STATE_EOF
+    fi
+
+    local iteration=$starting_iteration
+
+    while [[ $iteration -lt $max_iterations ]]; do
         iteration=$((iteration + 1))
         local iter_timestamp
         iter_timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
+        # Check if there are still pending pages (skip on iteration 1 - pages not discovered yet)
+        if [[ $iteration -gt 1 ]] && [[ -f "$state_file" ]]; then
+            local pending_pages
+            pending_pages=$(grep -c '^\- \[ \]' "$state_file" 2>/dev/null || echo "0")
+            if [[ "$pending_pages" -eq 0 ]]; then
+                # Double-check by looking for the completion tag wasn't already output
+                if grep -q '\[x\]' "$state_file" 2>/dev/null; then
+                    echo ""
+                    log_success "All pages complete! Design polished after $((iteration - 1)) iterations."
+                    echo ""
+                    echo "Screenshots saved in: $session_dir/"
+                    echo ""
+                    echo "Next steps:"
+                    echo "  1. Review the changes: git diff"
+                    echo "  2. Run code review: cr review"
+                    echo "  3. Commit if satisfied: git add -A && git commit -m 'style: polish UI design'"
+                    echo ""
+                    exit 0
+                fi
+            fi
+        fi
+
         echo ""
-        echo -e "${CYAN}${BOLD}=== Design Iteration $iteration/$iterations ($iter_timestamp) ===${NC}"
+        echo -e "${CYAN}${BOLD}=== Design Iteration $iteration (page $iteration) - $iter_timestamp ===${NC}"
         echo ""
 
         # Log file for this iteration
         local log_file="$session_dir/$(printf '%02d' $iteration)-design.md"
 
-        # Create the design prompt
+        # Build context from previous iteration
+        local prev_context=""
+        if [[ $iteration -gt 1 ]]; then
+            local prev_log="$session_dir/$(printf '%02d' $((iteration - 1)))-design.md"
+            if [[ -f "$prev_log" ]]; then
+                # Extract summary from previous iteration (last 50 lines or key sections)
+                local prev_summary
+                prev_summary=$(tail -100 "$prev_log" | head -80)
+                prev_context="
+## Context from Previous Iteration
+
+The previous iteration (iteration $((iteration - 1))) made these changes:
+
+\`\`\`
+$prev_summary
+\`\`\`
+
+IMPORTANT: Review what was done above. Build on these changes, don't undo them.
+If issues were introduced, fix them. If improvements were made, maintain them.
+"
+            fi
+        fi
+
+        # Create the design prompt - ONE PAGE PER ITERATION
         local design_prompt="You are in iteration $iteration of a design improvement loop.
 
+THIS ITERATION: Focus on ONE page only. Do not try to fix all pages at once.
+
 TARGET URL: $url
+STATE FILE: $state_file
+SCREENSHOT DIR: $session_dir/
+$prev_context
+## Step 1: Read State & Identify Target Page
 
-INSTRUCTIONS:
-
-## Step 1: Discover All Pages (First iteration only)
-
-If this is iteration 1, crawl the site to find all pages:
-
+Read the state file:
 \`\`\`bash
-# Open the base URL
+cat $state_file
+\`\`\`
+
+**If iteration 1 (pages not yet discovered):**
+1. Crawl the site to discover all pages:
+\`\`\`bash
 agent-browser open $url
-
-# Get all navigation links
-agent-browser execute \"Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a')).map(a => a.href).filter(h => h.startsWith(window.location.origin))\"
+agent-browser execute \"Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a, main a')).map(a => a.href).filter(h => h && h.startsWith(window.location.origin)).filter((v,i,a) => a.indexOf(v) === i)\"
 \`\`\`
+2. Update the state file with ALL pages found (mark all as [ ] pending)
+3. Your target page is the FIRST page in the list
 
-Build a list of unique pages to improve. Store this list for subsequent iterations.
+**If iteration 2+:**
+1. Find the FIRST page marked [ ] (pending) in the state file
+2. That is your ONE target page for this iteration
 
-## Step 2: Screenshot Current State (ALL Pages)
+## Step 2: Screenshot Target Page (All Viewports)
 
-For EACH page discovered:
+Screenshot ONLY your target page at all viewport sizes:
 \`\`\`bash
-agent-browser open [page-url]
-agent-browser screenshot before-iter$iteration-[page-name].png
+agent-browser open [target-page-url]
+
+agent-browser resize 1920 1080
+agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-1920.png
+
+agent-browser resize 1440 900
+agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-1440.png
+
+agent-browser resize 1024 768
+agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-1024.png
+
+agent-browser resize 375 812
+agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-375.png
 \`\`\`
 
-## Step 3: Analyze ALL Pages
+## Step 3: Analyze Target Page
 
-For each page, evaluate:
+For your ONE target page, evaluate at each viewport:
 - Is it bland, generic, or 'AI-looking'?
-- What specific elements need improvement?
-- What's the overall visual hierarchy?
-- Is there consistency across pages?
+- Typography: hierarchy, font choices, spacing
+- Color: too much gray? No personality?
+- Layout: does it work at all viewport sizes?
+- Responsive: text compression at large widths? Layout breaks?
 
-## Step 4: Apply /frontend-design Skill Philosophy
+## Step 4: Apply /frontend-design Philosophy
 
-Apply to ALL pages:
-- Create DISTINCTIVE design, not generic templates
-- Use bold, intentional choices (not safe defaults)
-- Consider: typography, color, spacing, visual rhythm
-- Add personality and craft
-- Ensure visual consistency across all pages
+Make this ONE page distinctive:
+- Bold, intentional choices (not safe defaults)
+- Typography, color, spacing, visual rhythm
+- Personality and craft
+- Consistent with any global styles already established
 
-## Step 5: Make Improvements
+**If iteration 1:** Also establish global styles (CSS variables, shared components) that will apply to all pages.
 
-Focus on changes that affect multiple pages first (global styles):
-- Shared CSS/styling changes
-- Component improvements that appear on multiple pages
-- Then page-specific improvements
-- Run any build/dev commands if needed
+## Step 5: Make Improvements to Target Page
 
-## Step 6: Screenshot After State (ALL Pages)
+Fix the issues identified. For iteration 1, include global style changes.
+Run any build/dev commands if needed.
 
-For EACH page:
+## Step 6: Screenshot After (Target Page Only)
+
 \`\`\`bash
-agent-browser open [page-url]
-agent-browser screenshot after-iter$iteration-[page-name].png
+agent-browser open [target-page-url]
+
+agent-browser resize 1920 1080
+agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-1920.png
+
+agent-browser resize 1440 900
+agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-1440.png
+
+agent-browser resize 1024 768
+agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-1024.png
+
+agent-browser resize 375 812
+agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-375.png
 \`\`\`
 
-## Step 7: Evaluate Completion
+## Step 7: Compare Before/After
 
-If ALL pages are now polished and distinctive (not bland):
+View both screenshots to verify improvement:
+\`\`\`bash
+cat $session_dir/before-iter$iteration-[page-name]-1920.png
+cat $session_dir/after-iter$iteration-[page-name]-1920.png
+\`\`\`
+
+Check for:
+- Visible improvement in design
+- No regressions (text compression, layout breaks)
+- Works at all viewport sizes
+
+If issues found, fix them before proceeding.
+
+## Step 8: Update State File
+
+Mark your target page as complete and log changes:
+\`\`\`bash
+cat $state_file
+# Then use Edit tool to update it
+\`\`\`
+
+Change the page from [ ] to [x] and add to Changes Made section:
+- What you changed on this page
+- Any global styles added (iteration 1)
+
+## Step 9: Check Completion
+
+Read the updated state file. If ALL pages are marked [x] complete:
 Output: <design-complete>Design polished.</design-complete>
 
-IMPORTANT:
-- Each iteration should make VISIBLE improvement across ALL pages
-- Don't just add subtle tweaks - make bold changes
-- The goal is distinctive, memorable design on EVERY page
-- Avoid: gray backgrounds, generic shadows, safe color choices
-- Embrace: bold typography, intentional whitespace, personality
-- Ensure consistency: same design language across all pages
+If there are still [ ] pending pages, do NOT output the completion tag.
+The next iteration will handle the next page.
 
-Start by taking a screenshot of $url"
+IMPORTANT:
+- ONE page per iteration - do not try to do multiple pages
+- Iteration 1 should also establish global styles
+- Always verify all 4 viewport sizes (1920, 1440, 1024, 375)
+- Update state file before finishing so next iteration knows progress
+
+Start by reading $state_file to find your target page for this iteration."
 
         # Initialize log file
         {
@@ -3389,12 +3705,13 @@ Start by taking a screenshot of $url"
         fi
 
         # Check for completion signal (only exit early if not forced)
-        if grep -qE "<design-complete>" "$log_file"; then
+        # Match full tag with closing to avoid false positives
+        if grep -qE "<design-complete>.*</design-complete>" "$log_file"; then
             if [[ "$force_iterations" == "true" ]]; then
-                log_info "Design marked as polished, but continuing (--n forced $iterations iterations)"
+                log_info "Design marked as polished, but continuing (--n forced $max_iterations iterations)"
             else
                 echo ""
-                log_success "Design polished after $iteration iterations!"
+                log_success "All pages polished after $iteration iterations!"
                 echo ""
                 echo "Screenshots saved in: $session_dir/"
                 echo ""
@@ -3413,10 +3730,20 @@ Start by taking a screenshot of $url"
     done
 
     echo ""
-    log_warn "Completed $iterations design iterations."
+    log_warn "Reached max iterations ($max_iterations). Some pages may still need work."
     echo ""
-    echo "The design may need more work. Options:"
-    echo "  1. Run more iterations: cr design $url 5"
+    # Show remaining pages
+    if [[ -f "$state_file" ]]; then
+        local remaining
+        remaining=$(grep '^\- \[ \]' "$state_file" 2>/dev/null || true)
+        if [[ -n "$remaining" ]]; then
+            echo "Pages still pending:"
+            echo "$remaining"
+            echo ""
+        fi
+    fi
+    echo "Options:"
+    echo "  1. Continue: cr design --continue"
     echo "  2. Review changes: git diff"
     echo "  3. Run code review: cr review --design"
     echo ""
