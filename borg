@@ -3191,8 +3191,31 @@ detect_dev_server() {
 }
 
 cmd_design() {
-    local url="${1:-}"
-    local iterations="${2:-5}"
+    local url=""
+    local iterations=5
+    local force_iterations=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --n)
+                iterations="$2"
+                force_iterations=true
+                shift 2
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                log_error "Usage: borg design [url] [--n iterations]"
+                exit 1
+                ;;
+            *)
+                if [[ -z "$url" ]]; then
+                    url="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
 
     log_step "Design Improvement Loop"
 
@@ -3218,6 +3241,11 @@ cmd_design() {
     echo ""
     echo "URL:        $url"
     echo "Iterations: $iterations"
+    if [[ "$force_iterations" == "true" ]]; then
+        echo "Mode:       Forced (will run all $iterations iterations)"
+    else
+        echo "Mode:       Auto (exits early when design is polished)"
+    fi
     echo ""
     echo "This will:"
     echo "  1. Discover ALL pages (nav, header, footer links)"
@@ -3348,19 +3376,23 @@ Start by taking a screenshot of $url"
             continue
         fi
 
-        # Check for completion signal
+        # Check for completion signal (only exit early if not forced)
         if grep -qE "<design-complete>" "$log_file"; then
-            echo ""
-            log_success "Design polished after $iteration iterations!"
-            echo ""
-            echo "Screenshots saved in: $session_dir/"
-            echo ""
-            echo "Next steps:"
-            echo "  1. Review the changes: git diff"
-            echo "  2. Run code review: borg review"
-            echo "  3. Commit if satisfied: git add -A && git commit -m 'style: polish UI design'"
-            echo ""
-            exit 0
+            if [[ "$force_iterations" == "true" ]]; then
+                log_info "Design marked as polished, but continuing (--n forced $iterations iterations)"
+            else
+                echo ""
+                log_success "Design polished after $iteration iterations!"
+                echo ""
+                echo "Screenshots saved in: $session_dir/"
+                echo ""
+                echo "Next steps:"
+                echo "  1. Review the changes: git diff"
+                echo "  2. Run code review: borg review"
+                echo "  3. Commit if satisfied: git add -A && git commit -m 'style: polish UI design'"
+                echo ""
+                exit 0
+            fi
         fi
 
         # Brief pause between iterations
@@ -3516,7 +3548,8 @@ COMMANDS:
                         Creates: specs/<feature>/fixes/[code|design]/
 
     design [url]        Proactive design improvement loop
-        [iterations]    Number of iterations (default: 5)
+        [--n N]         Force exactly N iterations (no early exit)
+                        Default: exits early when design is polished
                         Auto-detects dev server if no URL
                         Discovers and improves ALL pages (nav, footer links)
                         Uses /frontend-design skill for distinctive UI
