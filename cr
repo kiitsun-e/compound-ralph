@@ -2660,7 +2660,7 @@ Run the review now."
             mkdir -p "$review_session_dir"
 
             log_info "Design review target: $design_url"
-            log_info "Will discover ALL pages (nav, header, footer links)"
+            log_info "Will discover ALL pages AND view states (SPA-aware)"
             log_info "Screenshots will be saved to: $review_session_dir/"
             log_info "Findings will be saved to: $spec_name/todos/design/"
             echo ""
@@ -2687,58 +2687,129 @@ TARGET URL: $design_url
 
 INSTRUCTIONS:
 
-## Step 1: Discover All Pages
+## Step 1: Discover All Pages (URL-based)
 
-First, crawl the site to find all pages:
+First, crawl the site to find all URL-based pages:
 
 \`\`\`bash
 # Open the base URL
 agent-browser open $design_url
 
 # Get all navigation links (look for nav, header, footer links)
-agent-browser execute \"Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a')).map(a => a.href).filter(h => h.startsWith(window.location.origin))\"
+agent-browser eval \"Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a')).map(a => a.href).filter(h => h.startsWith(window.location.origin))\"
 \`\`\`
 
-Build a list of unique pages to review. Include at minimum:
-- Homepage ($design_url)
-- All pages linked from main navigation
-- Any pages linked in footer
+Build a list of unique URL pages to review.
 
-## Step 2: Screenshot Each Page at Multiple Viewports
+## Step 2: Discover View States (SPA-aware)
+
+CRITICAL: Modern SPAs have multiple views/states at the SAME URL. You must discover these.
+
+For EACH page, after opening it, discover view states:
+
+\`\`\`bash
+# Get interactive elements to find view switchers
+agent-browser snapshot -i
+\`\`\`
+
+Look for these patterns in the snapshot output:
+
+1. **Tab groups / View switchers** - Elements with:
+   - role=\"tablist\" or role=\"tab\"
+   - Buttons/links labeled: View, Mode, Tab, Focus, Tree, Gallery, Compare, List, Grid, Stats
+   - Segmented controls or toggle button groups
+   - Sidebar navigation items that don't change URL
+
+2. **Keyboard shortcuts** - Check for:
+   - Number keys 1-9 often switch views
+   - Letters like G (gallery), T (tree), S (stats)
+   - Look for keyboard hint text or data-shortcut attributes
+   \`\`\`bash
+   # Try common view-switching shortcuts
+   agent-browser press 1
+   agent-browser snapshot -i  # Check if view changed
+   agent-browser press 2
+   agent-browser snapshot -i  # Check if view changed
+   # Continue for 3, 4, 5 if views keep changing
+   \`\`\`
+
+3. **Collapsible sidebars** - Look for:
+   - Toggle buttons for sidebars/panels
+   - Collapsed vs expanded states
+   - Left/right panel toggles
+
+4. **Sub-tabs within views** - Like:
+   - \"Trees\" vs \"Favorites\" tabs in a sidebar
+   - Filter modes or display options
+
+Build a complete list of view states for each page:
+\`\`\`
+Page: /dashboard
+  - View: focus (default, or press 1)
+  - View: tree (press 2, or click Tree tab)
+  - View: compare (press 3)
+  - View: gallery (press 4)
+  - View: statistics (press 5)
+  - Sidebar: trees tab
+  - Sidebar: favorites tab
+  - Sidebar: collapsed state
+\`\`\`
+
+## Step 3: Screenshot Each Page AND View State at Multiple Viewports
 
 SCREENSHOT DIRECTORY: $review_session_dir/
 
-For EACH discovered page, screenshot at MULTIPLE viewport widths to catch responsive issues:
+For EACH page, and for EACH view state on that page, screenshot at ALL viewport widths:
+
 \`\`\`bash
+# Example: Dashboard with multiple view states
 agent-browser open [page-url]
 
-# Desktop (1920px)
+# === DEFAULT VIEW ===
 agent-browser resize 1920 1080
-agent-browser screenshot $review_session_dir/[page-name]-1920.png
-
-# Laptop (1440px)
+agent-browser screenshot $review_session_dir/[page-name]-default-1920.png
 agent-browser resize 1440 900
-agent-browser screenshot $review_session_dir/[page-name]-1440.png
-
-# Tablet (1024px)
+agent-browser screenshot $review_session_dir/[page-name]-default-1440.png
 agent-browser resize 1024 768
-agent-browser screenshot $review_session_dir/[page-name]-1024.png
-
-# Mobile (375px)
+agent-browser screenshot $review_session_dir/[page-name]-default-1024.png
 agent-browser resize 375 812
-agent-browser screenshot $review_session_dir/[page-name]-375.png
+agent-browser screenshot $review_session_dir/[page-name]-default-375.png
+
+# === EACH DISCOVERED VIEW STATE ===
+# Switch to next view (click tab or press shortcut)
+agent-browser press 2  # or: agent-browser click @e5
+agent-browser resize 1920 1080
+agent-browser screenshot $review_session_dir/[page-name]-[view-name]-1920.png
+agent-browser resize 1440 900
+agent-browser screenshot $review_session_dir/[page-name]-[view-name]-1440.png
+agent-browser resize 1024 768
+agent-browser screenshot $review_session_dir/[page-name]-[view-name]-1024.png
+agent-browser resize 375 812
+agent-browser screenshot $review_session_dir/[page-name]-[view-name]-375.png
+
+# Repeat for ALL view states discovered in Step 2
 \`\`\`
 
-IMPORTANT: Always screenshot ALL viewport sizes. Responsive bugs (text compression, layout breaks) often only appear at specific widths.
+Naming convention for screenshots:
+- \`landing-1920.png\` - Simple page, no view states
+- \`dashboard-focus-1920.png\` - Dashboard in focus view
+- \`dashboard-tree-1920.png\` - Dashboard in tree view
+- \`dashboard-gallery-1440.png\` - Dashboard gallery at laptop size
+- \`dashboard-sidebar-collapsed-1024.png\` - Collapsed sidebar state
 
-## Step 3: Load Design Skill
+IMPORTANT:
+- Screenshot ALL viewport sizes for EVERY view state
+- Don't skip views - each view may have unique responsive issues
+- Sidebar states often break differently than main content
+
+## Step 4: Load Design Skill
 
 Load the /frontend-design skill to apply its philosophy:
 Use: skill: frontend-design
 
-## Step 4: Review ALL Pages
+## Step 5: Review ALL Pages AND View States
 
-Apply the /frontend-design skill philosophy to critique EACH page:
+Apply the /frontend-design skill philosophy to critique EACH page AND EACH view state:
 
    DISTINCTIVE vs GENERIC - Ask yourself:
    - Does this look like every other AI-generated site? (Bad)
@@ -2787,13 +2858,14 @@ Apply the /frontend-design skill philosophy to critique EACH page:
 
    Name files like: 001-p2-bland-hero.md, 002-p2-weak-typography.md
 
-5. Use this format (note: include PAGE where issue was found):
+5. Use this format (note: include PAGE and VIEW STATE where issue was found):
 ---
 priority: p2
 tags: [design, ui, frontend-design]
 spec: $design_spec_tag
 type: design
 page: [url of page where issue found]
+view: [view state if applicable, e.g., \"tree\", \"gallery\", \"sidebar-collapsed\"]
 ---
 # [Issue Title]
 
@@ -2802,8 +2874,9 @@ page: [url of page where issue found]
 
 ## Findings
 - Page: \`[full URL of the page]\`
+- View State: \`[view name, e.g., tree, gallery, focus]\` (or \"default\" if no SPA views)
 - File: \`path/to/component.tsx\`
-- Screenshot: [describe what you see]
+- Screenshot: [reference screenshot filename, e.g., dashboard-tree-375.png]
 - Principle violated: [e.g., 'Generic color palette with too much gray']
 
 ## Recommended Action
@@ -2813,19 +2886,37 @@ page: [url of page where issue found]
 ## Acceptance Criteria
 - [ ] [Specific visual outcome that would satisfy /frontend-design standards]
 
-## Pages Summary
+## Review Summary
 
-After reviewing ALL pages at ALL viewport sizes, provide a summary:
-- Total pages reviewed: [N]
+After reviewing ALL pages, ALL view states, at ALL viewport sizes, provide a summary:
+- Total URL pages reviewed: [N]
+- Total view states reviewed: [N] (e.g., dashboard has 5 views = 5 states)
 - Viewport sizes tested: 1920px, 1440px, 1024px, 375px
-- Pages with issues: [list]
-- Global issues (affect all pages): [list]
+- Total screenshots taken: [N]
+
+### Issues Found
+- Global issues (affect all pages/views): [list]
 - Page-specific issues: [list by page]
+- View-specific issues: [list by view state]
 - Responsive issues: [list any layout/scaling problems at specific viewports]
+
+### View State Coverage
+List all view states discovered and reviewed:
+| Page | View State | Screenshots |
+|------|------------|-------------|
+| /dashboard | focus | 4 viewports |
+| /dashboard | tree | 4 viewports |
+| etc. | | |
 
 IMPORTANT: Be opinionated. The /frontend-design skill demands distinctive, memorable design.
 Don't accept 'good enough' - push for design that has craft and personality.
-Review EVERY page discovered at EVERY viewport size, not just the homepage at default size.
+
+CRITICAL FOR SPAs:
+- Review EVERY view state, not just the default view
+- Each view (focus, tree, gallery, etc.) may have completely different layouts and issues
+- Sidebar states (collapsed, different tabs) often have unique responsive bugs
+- A thorough review of a complex SPA like a dashboard should have 20-50+ screenshots
+
 Screenshots are saved to: $review_session_dir/"
 
             echo "$design_review_prompt" | claude --dangerously-skip-permissions --print
@@ -3219,6 +3310,26 @@ FIXPROMPT
     # Create history directory
     mkdir -p "$fix_dir/.history"
 
+    # Archive todos so they won't be re-read on next `cr fix`
+    local archive_timestamp
+    archive_timestamp=$(date '+%Y%m%d-%H%M%S')
+
+    for todos_dir in "${todos_dirs[@]}"; do
+        if [[ -d "$todos_dir" ]]; then
+            local archive_dir="$todos_dir/_archived/$archive_timestamp"
+            mkdir -p "$archive_dir"
+
+            # Move all .md files (except in _archived) to archive
+            while IFS= read -r file; do
+                if [[ -n "$file" ]]; then
+                    mv "$file" "$archive_dir/"
+                fi
+            done < <(find "$todos_dir" -maxdepth 1 -name "*.md" 2>/dev/null)
+
+            log_info "Archived $(ls "$archive_dir"/*.md 2>/dev/null | wc -l | tr -d ' ') todos to ${todos_dir}/_archived/$archive_timestamp/"
+        fi
+    done
+
     log_success "Created fix spec from $todo_count todos"
     echo ""
     echo "Fix spec: $fix_dir/"
@@ -3436,21 +3547,21 @@ cmd_design() {
         log_info "Continuing session: $session_dir"
         log_info "Previous iterations: $starting_iteration"
 
-        # Count pending pages
+        # Count pending pages/views
         local pending_count
         pending_count=$(grep -c '^\- \[ \]' "$state_file" 2>/dev/null || echo "?")
         local complete_count
         complete_count=$(grep -c '^\- \[x\]' "$state_file" 2>/dev/null || echo "0")
 
-        log_info "Pages complete: $complete_count, Pages pending: $pending_count"
+        log_info "Complete: $complete_count, Pending: $pending_count (pages + view states)"
         echo ""
 
-        # Show pending pages
-        local pending_pages
-        pending_pages=$(grep '^\- \[ \]' "$state_file" 2>/dev/null || true)
-        if [[ -n "$pending_pages" ]]; then
-            echo "Pending pages:"
-            echo "$pending_pages"
+        # Show pending pages/views
+        local pending_items
+        pending_items=$(grep '^\- \[ \]' "$state_file" 2>/dev/null || true)
+        if [[ -n "$pending_items" ]]; then
+            echo "Pending pages/views:"
+            echo "$pending_items"
             echo ""
         fi
     else
@@ -3468,18 +3579,22 @@ cmd_design() {
         cat > "$state_file" << 'STATE_EOF'
 # Design State
 
-This file tracks progress across design iterations. ONE page per iteration.
+This file tracks progress across design iterations. ONE page/view per iteration.
 
-## Pages to Update
+## Pages & View States to Update
 
-<!-- After discovering pages, list them here with checkboxes -->
+<!-- After discovering pages AND view states, list them here with checkboxes -->
 <!-- Example:
 - [ ] / (Landing page)
-- [ ] /login (Login page)
-- [ ] /about (About page)
+- [ ] /dashboard:focus (Dashboard - Focus view)
+- [ ] /dashboard:tree (Dashboard - Tree view)
+- [ ] /dashboard:compare (Dashboard - Compare view)
+- [ ] /dashboard:gallery (Dashboard - Gallery view)
+- [ ] /dashboard:statistics (Dashboard - Statistics view)
+- [ ] /dashboard:sidebar-collapsed (Dashboard - Collapsed sidebar)
 -->
 
-Pages not yet discovered. Run iteration 1 to crawl and populate this list.
+Pages/views not yet discovered. Run iteration 1 to crawl and populate this list.
 
 ## Global Styles (Iteration 1)
 
@@ -3502,7 +3617,7 @@ STATE_EOF
         local iter_timestamp
         iter_timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
-        # Check if there are still pending pages (skip on iteration 1 - pages not discovered yet)
+        # Check if there are still pending pages/views (skip on iteration 1 - not discovered yet)
         if [[ $iteration -gt 1 ]] && [[ -f "$state_file" ]]; then
             local pending_pages
             pending_pages=$(grep -c '^\- \[ \]' "$state_file" 2>/dev/null || echo "0")
@@ -3510,7 +3625,7 @@ STATE_EOF
                 # Double-check by looking for the completion tag wasn't already output
                 if grep -q '\[x\]' "$state_file" 2>/dev/null; then
                     echo ""
-                    log_success "All pages complete! Design polished after $((iteration - 1)) iterations."
+                    log_success "All pages/views complete! Design polished after $((iteration - 1)) iterations."
                     echo ""
                     echo "Screenshots saved in: $session_dir/"
                     echo ""
@@ -3570,41 +3685,69 @@ Read the state file:
 cat $state_file
 \`\`\`
 
-**If iteration 1 (pages not yet discovered):**
-1. Crawl the site to discover all pages:
+**If iteration 1 (pages/views not yet discovered):**
+1. Crawl the site to discover all URL-based pages:
 \`\`\`bash
 agent-browser open $url
-agent-browser execute \"Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a, main a')).map(a => a.href).filter(h => h && h.startsWith(window.location.origin)).filter((v,i,a) => a.indexOf(v) === i)\"
+agent-browser eval \"Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a, main a')).map(a => a.href).filter(h => h && h.startsWith(window.location.origin)).filter((v,i,a) => a.indexOf(v) === i)\"
 \`\`\`
-2. Update the state file with ALL pages found (mark all as [ ] pending)
-3. Your target page is the FIRST page in the list
+
+2. For EACH page, discover SPA view states:
+\`\`\`bash
+agent-browser snapshot -i  # Look for tabs, view switchers, sidebars
+# Try keyboard shortcuts 1-5 to find view modes
+agent-browser press 1
+agent-browser snapshot -i  # Did view change?
+agent-browser press 2
+agent-browser snapshot -i  # Did view change?
+# Continue until no more views
+\`\`\`
+
+3. Update the state file with ALL pages AND view states (mark all as [ ] pending):
+   - Simple pages: \`- [ ] / (Landing)\`
+   - SPA views: \`- [ ] /dashboard:focus (Dashboard - Focus view)\`
+   - SPA views: \`- [ ] /dashboard:tree (Dashboard - Tree view)\`
+   - Sidebar states: \`- [ ] /dashboard:sidebar-collapsed\`
+
+4. Your target for this iteration is the FIRST item in the list
 
 **If iteration 2+:**
-1. Find the FIRST page marked [ ] (pending) in the state file
-2. That is your ONE target page for this iteration
+1. Find the FIRST item marked [ ] (pending) in the state file
+2. That is your ONE target page/view for this iteration
+3. If it's a view state (has : in it), navigate to the page then activate that view
 
-## Step 2: Screenshot Target Page (All Viewports)
+## Step 2: Screenshot Target Page/View (All Viewports)
 
-Screenshot ONLY your target page at all viewport sizes:
+Screenshot ONLY your target page/view at all viewport sizes:
 \`\`\`bash
+# Navigate to page
 agent-browser open [target-page-url]
 
+# If target is a view state (e.g., /dashboard:tree), activate it:
+# - Press keyboard shortcut (1-5) or click the view tab
+agent-browser press 2  # Example: activate tree view
+
 agent-browser resize 1920 1080
-agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-1920.png
+agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-[view]-1920.png
 
 agent-browser resize 1440 900
-agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-1440.png
+agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-[view]-1440.png
 
 agent-browser resize 1024 768
-agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-1024.png
+agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-[view]-1024.png
 
 agent-browser resize 375 812
-agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-375.png
+agent-browser screenshot $session_dir/before-iter$iteration-[page-name]-[view]-375.png
 \`\`\`
 
-## Step 3: Analyze Target Page
+Naming examples:
+- \`before-iter3-landing-1920.png\` (simple page)
+- \`before-iter3-dashboard-tree-1920.png\` (view state)
+- \`before-iter3-dashboard-sidebar-collapsed-375.png\` (sidebar state)
 
-For your ONE target page, evaluate at each viewport:
+## Step 3: Analyze Target Page/View
+
+For your ONE target page/view, evaluate at each viewport:
 - Is it bland, generic, or 'AI-looking'?
 - Typography: hierarchy, font choices, spacing
 - Color: too much gray? No personality?
@@ -3626,30 +3769,31 @@ Make this ONE page distinctive:
 Fix the issues identified. For iteration 1, include global style changes.
 Run any build/dev commands if needed.
 
-## Step 6: Screenshot After (Target Page Only)
+## Step 6: Screenshot After (Target Page/View Only)
 
 \`\`\`bash
 agent-browser open [target-page-url]
+# If view state, activate it again (press shortcut or click tab)
 
 agent-browser resize 1920 1080
-agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-1920.png
+agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-[view]-1920.png
 
 agent-browser resize 1440 900
-agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-1440.png
+agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-[view]-1440.png
 
 agent-browser resize 1024 768
-agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-1024.png
+agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-[view]-1024.png
 
 agent-browser resize 375 812
-agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-375.png
+agent-browser screenshot $session_dir/after-iter$iteration-[page-name]-[view]-375.png
 \`\`\`
 
 ## Step 7: Compare Before/After
 
 View both screenshots to verify improvement:
 \`\`\`bash
-cat $session_dir/before-iter$iteration-[page-name]-1920.png
-cat $session_dir/after-iter$iteration-[page-name]-1920.png
+cat $session_dir/before-iter$iteration-[page-name]-[view]-1920.png
+cat $session_dir/after-iter$iteration-[page-name]-[view]-1920.png
 \`\`\`
 
 Check for:
@@ -3661,31 +3805,33 @@ If issues found, fix them before proceeding.
 
 ## Step 8: Update State File
 
-Mark your target page as complete and log changes:
+Mark your target page/view as complete and log changes:
 \`\`\`bash
 cat $state_file
 # Then use Edit tool to update it
 \`\`\`
 
-Change the page from [ ] to [x] and add to Changes Made section:
-- What you changed on this page
+Change the item from [ ] to [x] and add to Changes Made section:
+- What you changed on this page/view
 - Any global styles added (iteration 1)
 
 ## Step 9: Check Completion
 
-Read the updated state file. If ALL pages are marked [x] complete:
+Read the updated state file. If ALL pages/views are marked [x] complete:
 Output: <design-complete>Design polished.</design-complete>
 
-If there are still [ ] pending pages, do NOT output the completion tag.
-The next iteration will handle the next page.
+If there are still [ ] pending items, do NOT output the completion tag.
+The next iteration will handle the next page/view.
 
 IMPORTANT:
-- ONE page per iteration - do not try to do multiple pages
+- ONE page/view per iteration - do not try to do multiple
+- Iteration 1 should discover ALL pages AND view states (SPA-aware)
 - Iteration 1 should also establish global styles
+- View states on same page share CSS, so later views may need less work
 - Always verify all 4 viewport sizes (1920, 1440, 1024, 375)
 - Update state file before finishing so next iteration knows progress
 
-Start by reading $state_file to find your target page for this iteration."
+Start by reading $state_file to find your target page/view for this iteration."
 
         # Initialize log file
         {
@@ -3711,7 +3857,7 @@ Start by reading $state_file to find your target page for this iteration."
                 log_info "Design marked as polished, but continuing (--n forced $max_iterations iterations)"
             else
                 echo ""
-                log_success "All pages polished after $iteration iterations!"
+                log_success "All pages/views polished after $iteration iterations!"
                 echo ""
                 echo "Screenshots saved in: $session_dir/"
                 echo ""
@@ -3874,9 +4020,10 @@ COMMANDS:
 
     review [spec]       Run comprehensive code review (spec-aware)
         [--design]      Include design review (requires dev server)
-        [--design-only] Only run design review (crawls ALL pages)
+        [--design-only] Only run design review (SPA-aware)
         [--url URL]     Specify dev server URL for design review
-                        Discovers all pages via nav/footer links
+                        Discovers pages via nav/footer + SPA view states
+                        (tabs, keyboard shortcuts 1-5, sidebars, etc.)
                         Saves todos to: specs/<feature>/todos/code/
                                     or: specs/<feature>/todos/design/
 
@@ -3886,11 +4033,12 @@ COMMANDS:
         (no arg)        Fix all issues
                         Creates: specs/<feature>/fixes/[code|design]/
 
-    design [url]        Proactive design improvement loop
+    design [url]        Proactive design improvement loop (SPA-aware)
         [--n N]         Force exactly N iterations (no early exit)
                         Default: exits early when design is polished
                         Auto-detects dev server if no URL
-                        Discovers and improves ALL pages (nav, footer links)
+                        Discovers ALL pages AND view states
+                        (nav links, keyboard shortcuts, tabs, sidebars)
                         Uses /frontend-design skill for distinctive UI
                         Saves screenshots to design-iterations/
 
