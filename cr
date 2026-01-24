@@ -659,102 +659,115 @@ run_iteration_checks() {
                 local timestamp
                 timestamp=$(date '+%Y%m%d-%H%M%S')
 
-                # Open the page first (agent-browser requires open before eval)
+                # Open the base page first
                 agent-browser open "$dev_url" 2>/dev/null || true
                 sleep 2  # Wait for page to load
 
-                # Take screenshot
-                local screenshot_file="$screenshot_dir/iteration-$timestamp.png"
-                agent-browser screenshot "$screenshot_file" 2>/dev/null || true
+                # Discover all pages via navigation links (like cr design does)
+                local all_pages
+                all_pages=$(agent-browser eval "Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a, main a')).map(a => a.href).filter(h => h && h.startsWith(window.location.origin)).filter((v,i,a) => a.indexOf(v) === i).join(' ')" 2>&1) || true
 
-                if [[ -f "$screenshot_file" ]]; then
-                    log_info "Screenshot saved: $screenshot_file"
+                # Build list of pages to check (base URL + discovered pages, max 5)
+                local pages_to_check=("$dev_url")
+                if [[ -n "$all_pages" ]] && [[ "$all_pages" != *"error"* ]]; then
+                    local page_count=0
+                    for page in $all_pages; do
+                        [[ "$page" == "$dev_url" ]] && continue
+                        [[ "$page" == "$dev_url/" ]] && continue
+                        pages_to_check+=("$page")
+                        page_count=$((page_count + 1))
+                        [[ $page_count -ge 4 ]] && break  # Max 4 additional pages
+                    done
                 fi
 
-                # Check for runtime errors and error overlays using pure expressions
-                # agent-browser eval runs JS on the currently open page
+                log_info "Checking ${#pages_to_check[@]} pages: ${pages_to_check[*]}"
 
-                # Check 1: Error overlays present?
-                local has_error_overlay
-                has_error_overlay=$(agent-browser eval "document.querySelectorAll('[data-nextjs-error], .error-overlay, #webpack-dev-server-client-overlay, [class*=vite-error], .svelte-error-overlay').length" 2>&1) || true
-                if [[ "$has_error_overlay" =~ ^[0-9]+$ ]] && [[ "$has_error_overlay" -gt 0 ]]; then
-                    ITERATION_ISSUES+=("Error overlay detected on page")
-                    all_passed=false
-                    log_warn "Error overlay detected on page"
-                fi
+                # Check each page
+                local page_issues=()
+                for page_url in "${pages_to_check[@]}"; do
+                    local page_name="${page_url#$dev_url}"
+                    [[ -z "$page_name" ]] && page_name="/"
 
-                # Check 2: Page too small/blank?
-                local body_length
-                body_length=$(agent-browser eval "document.body ? document.body.innerHTML.trim().length : 0" 2>&1) || true
-                if [[ "$body_length" =~ ^[0-9]+$ ]] && [[ "$body_length" -lt 50 ]]; then
-                    ITERATION_ISSUES+=("Page appears blank - possible render failure")
-                    all_passed=false
-                    log_warn "Page appears blank - possible render failure"
-                fi
+                    # Open the page
+                    agent-browser open "$page_url" 2>/dev/null || true
+                    sleep 1
 
-                # Check 3: Interactive elements - separate buttons from links
-                local button_count link_count clickable_buttons
-                button_count=$(agent-browser eval "document.querySelectorAll('button, [role=button]').length" 2>&1) || true
-                link_count=$(agent-browser eval "document.querySelectorAll('a[href]').length" 2>&1) || true
-                clickable_buttons=$(agent-browser eval "Array.from(document.querySelectorAll('button, [role=button]')).filter(function(el) { var s = window.getComputedStyle(el); return s.pointerEvents !== 'none' && s.display !== 'none'; }).length" 2>&1) || true
+                    # Take screenshot
+                    local safe_name="${page_name//\//_}"
+                    [[ "$safe_name" == "_" ]] && safe_name="home"
+                    local screenshot_file="$screenshot_dir/iteration-$timestamp-$safe_name.png"
+                    agent-browser screenshot "$screenshot_file" 2>/dev/null || true
 
-                if [[ "$button_count" =~ ^[0-9]+$ ]] && [[ "$link_count" =~ ^[0-9]+$ ]]; then
-                    log_info "Interactive elements: $button_count buttons, $link_count links"
+                    if [[ -f "$screenshot_file" ]]; then
+                        log_info "Screenshot: $page_name → $screenshot_file"
+                    fi
 
-                    # Only warn if there ARE buttons but none are clickable
-                    if [[ "$button_count" -gt 0 ]] && [[ "$clickable_buttons" =~ ^[0-9]+$ ]] && [[ "$clickable_buttons" -eq 0 ]]; then
-                        ITERATION_ISSUES+=("All $button_count buttons appear disabled or hidden")
+                    # Run checks for this page
+                    # Check 1: Error overlays present?
+                    local has_error_overlay
+                    has_error_overlay=$(agent-browser eval "document.querySelectorAll('[data-nextjs-error], .error-overlay, #webpack-dev-server-client-overlay, [class*=vite-error], .svelte-error-overlay').length" 2>&1) || true
+                    if [[ "$has_error_overlay" =~ ^[0-9]+$ ]] && [[ "$has_error_overlay" -gt 0 ]]; then
+                        ITERATION_ISSUES+=("$page_name: Error overlay detected")
                         all_passed=false
-                        log_warn "All $button_count buttons appear disabled or hidden"
+                        log_warn "$page_name: Error overlay detected"
                     fi
 
-                    # Warn if page has NO interactive elements at all
-                    if [[ "$button_count" -eq 0 ]] && [[ "$link_count" -eq 0 ]]; then
-                        log_warn "Page has no interactive elements (buttons or links)"
+                    # Check 2: Page too small/blank?
+                    local body_length
+                    body_length=$(agent-browser eval "document.body ? document.body.innerHTML.trim().length : 0" 2>&1) || true
+                    if [[ "$body_length" =~ ^[0-9]+$ ]] && [[ "$body_length" -lt 50 ]]; then
+                        ITERATION_ISSUES+=("$page_name: Page appears blank")
+                        all_passed=false
+                        log_warn "$page_name: Page appears blank"
                     fi
-                fi
 
-                # Check 4: Loading spinners stuck?
-                local loader_count
-                loader_count=$(agent-browser eval "document.querySelectorAll('[class*=loading], [class*=spinner], [aria-busy=true]').length" 2>&1) || true
-                if [[ "$loader_count" =~ ^[0-9]+$ ]] && [[ "$loader_count" -gt 3 ]]; then
-                    ITERATION_ISSUES+=("Multiple loading indicators present - possible stuck state")
-                    all_passed=false
-                    log_warn "Multiple loading indicators - possible stuck state"
-                fi
+                    # Check 3: Interactive elements - buttons on this page
+                    local button_count clickable_buttons
+                    button_count=$(agent-browser eval "document.querySelectorAll('button, [role=button]').length" 2>&1) || true
+                    clickable_buttons=$(agent-browser eval "Array.from(document.querySelectorAll('button, [role=button]')).filter(function(el) { var s = window.getComputedStyle(el); return s.pointerEvents !== 'none' && s.display !== 'none'; }).length" 2>&1) || true
 
-                # Check 5: Page responsiveness - test if eval works at all
-                local start_time end_time duration
-                start_time=$(date +%s)
-                local responsive_check
-                responsive_check=$(agent-browser eval "Date.now()" 2>&1) || true
-                end_time=$(date +%s)
-                duration=$((end_time - start_time))
-
-                if [[ "$duration" -gt 3 ]]; then
-                    ITERATION_ISSUES+=("Page slow to respond (${duration}s) - possible freeze or OOM")
-                    all_passed=false
-                    log_warn "Page slow to respond (${duration}s) - possible freeze/OOM"
-                elif [[ -z "$responsive_check" ]] || ! [[ "$responsive_check" =~ ^[0-9]+$ ]]; then
-                    # If we got an error message instead of a number, check what it says
-                    if [[ "$responsive_check" == *"Error"* ]] || [[ "$responsive_check" == *"error"* ]]; then
-                        log_warn "Browser eval error: $responsive_check"
-                        # Don't fail on eval errors - the other checks matter more
-                    else
-                        log_info "Page responsive (${duration}s)"
+                    if [[ "$button_count" =~ ^[0-9]+$ ]] && [[ "$button_count" -gt 0 ]]; then
+                        if [[ "$clickable_buttons" =~ ^[0-9]+$ ]] && [[ "$clickable_buttons" -eq 0 ]]; then
+                            ITERATION_ISSUES+=("$page_name: All $button_count buttons disabled/hidden")
+                            all_passed=false
+                            log_warn "$page_name: All $button_count buttons disabled/hidden"
+                        else
+                            log_info "$page_name: $clickable_buttons/$button_count buttons clickable"
+                        fi
                     fi
-                else
-                    log_info "Page responsive (${duration}s)"
-                fi
 
-                # Check 6: Look for visible error text (Uncaught, Error:, etc)
-                local error_text_check
-                error_text_check=$(agent-browser eval "document.body && document.body.innerText.match(/Uncaught|ReferenceError|TypeError|SyntaxError|RangeError|out of memory|OOM/i) ? 'ERROR_FOUND' : 'OK'" 2>&1) || true
-                if [[ "$error_text_check" == "ERROR_FOUND" ]]; then
-                    ITERATION_ISSUES+=("Error text visible on page")
-                    all_passed=false
-                    log_warn "Error text visible on page"
-                fi
+                    # Check 4: Loading spinners stuck?
+                    local loader_count
+                    loader_count=$(agent-browser eval "document.querySelectorAll('[class*=loading], [class*=spinner], [aria-busy=true]').length" 2>&1) || true
+                    if [[ "$loader_count" =~ ^[0-9]+$ ]] && [[ "$loader_count" -gt 3 ]]; then
+                        ITERATION_ISSUES+=("$page_name: Stuck loading state ($loader_count spinners)")
+                        all_passed=false
+                        log_warn "$page_name: Stuck loading state"
+                    fi
+
+                    # Check 5: Page responsiveness
+                    local start_time end_time duration
+                    start_time=$(date +%s)
+                    local responsive_check
+                    responsive_check=$(agent-browser eval "Date.now()" 2>&1) || true
+                    end_time=$(date +%s)
+                    duration=$((end_time - start_time))
+
+                    if [[ "$duration" -gt 3 ]]; then
+                        ITERATION_ISSUES+=("$page_name: Slow response (${duration}s)")
+                        all_passed=false
+                        log_warn "$page_name: Slow response (${duration}s)"
+                    fi
+
+                    # Check 6: Visible error text
+                    local error_text_check
+                    error_text_check=$(agent-browser eval "document.body && document.body.innerText.match(/Uncaught|ReferenceError|TypeError|SyntaxError|RangeError|out of memory|OOM/i) ? 'ERROR_FOUND' : 'OK'" 2>&1) || true
+                    if [[ "$error_text_check" == "ERROR_FOUND" ]]; then
+                        ITERATION_ISSUES+=("$page_name: Error text visible")
+                        all_passed=false
+                        log_warn "$page_name: Error text visible"
+                    fi
+                done
 
                 # Close the browser to clean up
                 agent-browser close 2>/dev/null || true
