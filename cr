@@ -692,18 +692,25 @@ run_iteration_checks() {
                     log_warn "Page appears blank - possible render failure"
                 fi
 
-                # Check 3: Buttons/interactive elements count
-                local button_count
-                button_count=$(agent-browser eval "document.querySelectorAll('button, [role=button], a[href]').length" 2>&1) || true
-                local clickable_count
-                clickable_count=$(agent-browser eval "Array.from(document.querySelectorAll('button, [role=button]')).filter(function(el) { var s = window.getComputedStyle(el); return s.pointerEvents !== 'none' && s.display !== 'none'; }).length" 2>&1) || true
+                # Check 3: Interactive elements - separate buttons from links
+                local button_count link_count clickable_buttons
+                button_count=$(agent-browser eval "document.querySelectorAll('button, [role=button]').length" 2>&1) || true
+                link_count=$(agent-browser eval "document.querySelectorAll('a[href]').length" 2>&1) || true
+                clickable_buttons=$(agent-browser eval "Array.from(document.querySelectorAll('button, [role=button]')).filter(function(el) { var s = window.getComputedStyle(el); return s.pointerEvents !== 'none' && s.display !== 'none'; }).length" 2>&1) || true
 
-                if [[ "$button_count" =~ ^[0-9]+$ ]] && [[ "$clickable_count" =~ ^[0-9]+$ ]]; then
-                    log_info "Interactive elements: $clickable_count clickable of $button_count total"
-                    if [[ "$button_count" -gt 0 ]] && [[ "$clickable_count" -eq 0 ]]; then
-                        ITERATION_ISSUES+=("All buttons appear disabled or hidden")
+                if [[ "$button_count" =~ ^[0-9]+$ ]] && [[ "$link_count" =~ ^[0-9]+$ ]]; then
+                    log_info "Interactive elements: $button_count buttons, $link_count links"
+
+                    # Only warn if there ARE buttons but none are clickable
+                    if [[ "$button_count" -gt 0 ]] && [[ "$clickable_buttons" =~ ^[0-9]+$ ]] && [[ "$clickable_buttons" -eq 0 ]]; then
+                        ITERATION_ISSUES+=("All $button_count buttons appear disabled or hidden")
                         all_passed=false
-                        log_warn "All buttons appear disabled or hidden"
+                        log_warn "All $button_count buttons appear disabled or hidden"
+                    fi
+
+                    # Warn if page has NO interactive elements at all
+                    if [[ "$button_count" -eq 0 ]] && [[ "$link_count" -eq 0 ]]; then
+                        log_warn "Page has no interactive elements (buttons or links)"
                     fi
                 fi
 
