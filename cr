@@ -593,53 +593,41 @@ run_iteration_checks() {
         done < <(get_spec_quality_commands "$spec_file")
     fi
 
-    # FALLBACK: If no SPEC commands found, use generic detection
+    # FALLBACK: If no SPEC commands found, warn and use minimal project.json detection
     if [[ $spec_commands_run -eq 0 ]]; then
-        log_info "No SPEC quality gates found, using generic detection..."
+        log_warn "No quality gates found in SPEC.md!"
+        log_warn "The implementing agent should discover and add quality gates."
+        log_warn "Attempting minimal fallback using project.json scripts..."
 
-        # Run tests from project.json
+        # Only run what we can discover from project.json - no framework-specific hardcoding
+        local pkg_manager
+        pkg_manager=$(get_project_config "package_manager")
+
+        # Try test command from project.json
         local test_cmd
         test_cmd=$(get_project_config "commands.test")
         if [[ -n "$test_cmd" ]]; then
-            log_info "Running tests: $test_cmd"
+            log_info "Running discovered test command: $test_cmd"
             if ! eval "CI=true $test_cmd" 2>&1 | tail -20; then
                 ITERATION_ISSUES+=("Tests failed")
                 all_passed=false
             fi
         fi
 
-        # Run lint if configured
-        local pkg_manager
-        pkg_manager=$(get_project_config "package_manager")
-        if [[ -f "package.json" ]] && grep -q '"lint"' package.json 2>/dev/null; then
-            local lint_cmd="$pkg_manager run lint"
-            log_info "Running lint: $lint_cmd"
-            if ! eval "$lint_cmd" 2>&1 | tail -10; then
-                ITERATION_ISSUES+=("Lint failed")
-                all_passed=false
+        # Try lint only if explicitly in package.json scripts (not framework-specific)
+        if [[ -f "package.json" ]] && [[ -n "$pkg_manager" ]]; then
+            if grep -q '"lint"' package.json 2>/dev/null; then
+                local lint_cmd="$pkg_manager run lint"
+                log_info "Running discovered lint command: $lint_cmd"
+                if ! eval "$lint_cmd" 2>&1 | tail -10; then
+                    ITERATION_ISSUES+=("Lint failed")
+                    all_passed=false
+                fi
             fi
         fi
 
-        # Run typecheck if configured
-        if [[ -f "package.json" ]] && grep -q '"typecheck"' package.json 2>/dev/null; then
-            local typecheck_cmd="$pkg_manager run typecheck"
-            log_info "Running typecheck: $typecheck_cmd"
-            if ! eval "$typecheck_cmd" 2>&1 | tail -10; then
-                ITERATION_ISSUES+=("Typecheck failed")
-                all_passed=false
-            fi
-        fi
-
-        # Run build if configured
-        local build_cmd
-        build_cmd=$(get_project_config "commands.build")
-        if [[ -n "$build_cmd" ]]; then
-            log_info "Running build: $build_cmd"
-            if ! eval "$build_cmd" 2>&1 | tail -20; then
-                ITERATION_ISSUES+=("Build failed")
-                all_passed=false
-            fi
-        fi
+        # Note: We intentionally don't run typecheck/build here unless they're in SPEC
+        # The agent should discover and add appropriate quality gates to SPEC.md
     fi
 
     # VISUAL/FUNCTIONAL VERIFICATION
@@ -711,6 +699,9 @@ run_iteration_checks() {
                     fi
 
                     # Run checks for this page
+                    # Clear any pre-existing errors before running checks
+                    agent-browser errors --clear 2>/dev/null || true
+
                     # Check 1: Error overlays present?
                     local has_error_overlay
                     has_error_overlay=$(agent-browser eval "document.querySelectorAll('[data-nextjs-error], .error-overlay, #webpack-dev-server-client-overlay, [class*=vite-error], .svelte-error-overlay').length" 2>&1) || true
@@ -774,6 +765,23 @@ run_iteration_checks() {
                         ITERATION_ISSUES+=("$page_name: Error text visible")
                         all_passed=false
                         log_warn "$page_name: Error text visible"
+                    fi
+
+                    # Check 7: Browser console errors (checked last to catch async errors)
+                    local console_errors
+                    console_errors=$(agent-browser errors 2>&1 | sed 's/\x1b\[[0-9;]*m//g') || true
+                    if [[ -n "$console_errors" ]]; then
+                        local error_count
+                        error_count=$(echo "$console_errors" | grep -c -E "." 2>/dev/null || echo "0")
+                        if [[ "$error_count" -gt 0 ]]; then
+                            ITERATION_ISSUES+=("$page_name: Console errors ($error_count lines)")
+                            all_passed=false
+                            log_warn "$page_name: Console errors detected ($error_count lines)"
+                            # Log first few errors for context
+                            echo "$console_errors" | head -3 | while read -r line; do
+                                [[ -n "$line" ]] && log_warn "  $line"
+                            done
+                        fi
                     fi
                 done
 
@@ -1382,12 +1390,10 @@ discover_quality_commands() {
                     quality_commands+=("bun run lint")
                 [[ -n "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && \
                     quality_commands+=("bun run typecheck")
-                # Astro projects: use 'astro check' for type checking
-                if ls astro.config.* &>/dev/null; then
-                    quality_commands+=("bun astro check")
-                    quality_commands+=("bun run build")
                 # Fallback to tsc if no typecheck script but tsconfig exists
-                elif [[ -z "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && [[ -f "tsconfig.json" ]]; then
+                # Note: Framework-specific checks (Astro, Next, etc.) should be in SPEC.md Quality Gates
+                # They are discovered by the LLM during cr spec, not hardcoded here
+                if [[ -z "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && [[ -f "tsconfig.json" ]]; then
                     quality_commands+=("bunx tsc --noEmit")
                 fi
             fi
@@ -2144,112 +2150,90 @@ cmd_spec() {
     local abs_spec_dir
     abs_spec_dir=$(cd "$spec_dir" && pwd)
 
-    # Detect project type for quality gates
+    # Detect project type (used for hints, but quality gates are LLM-discovered)
     local project_type
     project_type=$(detect_project_type ".")
 
-    # Generate quality gates based on project type and available scripts
-    local quality_gates=""
-    case "$project_type" in
-        bun)
-            quality_gates=""
-            has_script "test" && quality_gates+="- [ ] Tests pass: \`bun test\`"$'\n'
-            has_script "lint" && quality_gates+="- [ ] Lint clean: \`bun run lint\`"$'\n'
-            if has_script "typecheck"; then
-                quality_gates+="- [ ] Types check: \`bun run typecheck\`"$'\n'
-            elif [[ -f "tsconfig.json" ]]; then
-                quality_gates+="- [ ] Types check: \`bunx tsc --noEmit\`"$'\n'
-            fi
-            has_script "build" && quality_gates+="- [ ] Build succeeds: \`bun run build\`"
-            # Trim trailing newline
-            quality_gates="${quality_gates%$'\n'}"
-            ;;
-        npm|yarn|pnpm)
-            quality_gates=""
-            has_script "test" && quality_gates+="- [ ] Tests pass: \`$project_type run test\`"$'\n'
-            has_script "lint" && quality_gates+="- [ ] Lint clean: \`$project_type run lint\`"$'\n'
-            if has_script "typecheck"; then
-                quality_gates+="- [ ] Types check: \`$project_type run typecheck\`"$'\n'
-            elif [[ -f "tsconfig.json" ]]; then
-                quality_gates+="- [ ] Types check: \`npx tsc --noEmit\`"$'\n'
-            fi
-            has_script "build" && quality_gates+="- [ ] Build succeeds: \`$project_type run build\`"
-            quality_gates="${quality_gates%$'\n'}"
-            ;;
-        rails)
-            quality_gates="- [ ] Tests pass: \`bin/rails test\`
-- [ ] Lint clean: \`bundle exec rubocop\`"
-            [[ -f "Gemfile" ]] && grep -q "brakeman" Gemfile && \
-                quality_gates+=$'\n'"- [ ] Security check: \`bundle exec brakeman -q\`"
-            ;;
-        python)
-            quality_gates=""
-            [[ -f "pytest.ini" || -f "pyproject.toml" ]] && quality_gates+="- [ ] Tests pass: \`pytest\`"$'\n'
-            [[ -f "pyproject.toml" ]] && grep -q "ruff" pyproject.toml 2>/dev/null && \
-                quality_gates+="- [ ] Lint clean: \`ruff check .\`"$'\n'
-            [[ -f "pyproject.toml" ]] && grep -q "mypy" pyproject.toml 2>/dev/null && \
-                quality_gates+="- [ ] Types check: \`mypy .\`"
-            quality_gates="${quality_gates%$'\n'}"
-            ;;
-        *)
-            quality_gates="- [ ] Tests pass: \`<add test command>\`
-- [ ] Lint clean: \`<add lint command>\`"
-            ;;
-    esac
+    # Check if this is a greenfield project (no package manager files)
+    local is_greenfield="false"
+    if [[ ! -f "package.json" ]] && [[ ! -f "Gemfile" ]] && [[ ! -f "pyproject.toml" ]] && \
+       [[ ! -f "go.mod" ]] && [[ ! -f "Cargo.toml" ]]; then
+        is_greenfield="true"
+    fi
 
-    # If no quality gates were detected, add placeholder
-    [[ -z "$quality_gates" ]] && quality_gates="- [ ] Add quality gates for your project"
-
-    # Build dynamic validation command based on available scripts
-    local validate_cmd=""
-    case "$project_type" in
-        bun)
-            has_script "lint" && validate_cmd+="bun run lint"
-            if has_script "typecheck"; then
-                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
-                validate_cmd+="bun run typecheck"
-            elif [[ -f "tsconfig.json" ]]; then
-                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
-                validate_cmd+="bunx tsc --noEmit"
-            fi
-            ;;
-        npm|yarn|pnpm)
-            has_script "lint" && validate_cmd+="$project_type run lint"
-            if has_script "typecheck"; then
-                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
-                validate_cmd+="$project_type run typecheck"
-            elif [[ -f "tsconfig.json" ]]; then
-                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
-                validate_cmd+="npx tsc --noEmit"
-            fi
-            ;;
-        *)
-            validate_cmd="<add validation command>"
-            ;;
-    esac
-    [[ -z "$validate_cmd" ]] && validate_cmd="# No validation scripts found"
-
-    # Build install command
-    local install_cmd=""
-    case "$project_type" in
-        bun) install_cmd="bun install" ;;
-        npm) install_cmd="npm install" ;;
-        yarn) install_cmd="yarn install" ;;
-        pnpm) install_cmd="pnpm install" ;;
-        *) install_cmd="# Install dependencies" ;;
-    esac
+    # Quality gates are now discovered by Claude, not hardcoded here
+    # Claude will: extract from plan, discover from project files, or infer from plan text
 
     log_info "Reading plan and converting to SPEC format..."
+    log_info "Project type detected: $project_type (greenfield: $is_greenfield)"
     echo ""
 
-    # Use Claude to convert plan to SPEC with enforced task structure
+    # Use Claude to convert plan to SPEC with LLM-driven quality gate discovery
     local conversion_prompt="You are converting a plan document into a SPEC.md file for autonomous implementation.
 
 READ the plan file: $abs_plan_file
 
+Also examine the current project directory for existing config files:
+- package.json, tsconfig.json, eslint.config.*, vite.config.*, astro.config.*
+- Gemfile, .rubocop.yml
+- pyproject.toml, pytest.ini, ruff.toml
+- go.mod, Cargo.toml
+- Any other relevant config files
+
+Project info: type=$project_type, greenfield=$is_greenfield
+
 Then CREATE the file: $abs_spec_dir/SPEC.md
 
-The SPEC.md MUST follow this EXACT format with ENFORCED task structure:
+---
+
+## QUALITY GATE DISCOVERY (CRITICAL - DO NOT SKIP)
+
+You MUST populate the Quality Gates section. Follow this priority order:
+
+### Priority 1: Extract from Plan
+If the plan has a \"Quality Gates\" or \"### Quality Gates\" section:
+- Copy those commands EXACTLY as written
+- They are authoritative
+
+### Priority 2: Discover from Project Files
+If the project has existing config files (package.json, Gemfile, pyproject.toml, etc.):
+- Read the files to find available scripts/commands
+- For package.json: check scripts.test, scripts.lint, scripts.typecheck, scripts.build, scripts.check
+- For Gemfile: look for test gems (rspec, minitest), linters (rubocop), type checkers (sorbet)
+- For pyproject.toml: look for pytest, ruff, mypy, black configurations
+- Generate gates for commands that ACTUALLY EXIST in the config
+
+### Priority 3: Infer from Plan Text (Greenfield Projects)
+If the project directory is empty/minimal AND the plan mentions technologies:
+
+| Plan Mentions | Inferred Quality Gates |
+|---------------|------------------------|
+| \"astro\" | \\\`bunx astro check\\\`, \\\`bunx astro build\\\` |
+| \"next\", \"nextjs\" | \\\`next lint\\\`, \\\`next build\\\` |
+| \"vite\" | \\\`vite build\\\` |
+| \"vitest\" | \\\`vitest run\\\` |
+| \"jest\" | \\\`jest\\\` or \\\`npm test\\\` |
+| \"typescript\", \"tsx\" | \\\`tsc --noEmit\\\` or \\\`bunx tsc --noEmit\\\` |
+| \"eslint\" | \\\`eslint .\\\` |
+| \"prettier\" | \\\`prettier --check .\\\` |
+| \"rails\", \"ruby on rails\" | \\\`bin/rails test\\\`, \\\`bundle exec rubocop\\\` |
+| \"rspec\" | \\\`bundle exec rspec\\\` |
+| \"python\", \"fastapi\", \"django\", \"flask\" | \\\`pytest\\\` |
+| \"ruff\" | \\\`ruff check .\\\` |
+| \"mypy\" | \\\`mypy .\\\` |
+| \"go\", \"golang\" | \\\`go test ./...\\\`, \\\`go vet ./...\\\` |
+| \"rust\", \"cargo\" | \\\`cargo test\\\`, \\\`cargo clippy\\\` |
+
+For greenfield projects, add this comment above Full Gates:
+\\\`<!-- PROVISIONAL: Inferred from plan. Task 1 MUST verify these work. -->\\\`
+
+### Priority 4: Placeholder
+If you cannot determine quality gates:
+\\\`<!-- TODO: Discover quality gates in iteration 1 -->\\\`
+
+---
+
+The SPEC.md MUST follow this EXACT format:
 
 ---
 name: $feature_name
@@ -2286,26 +2270,21 @@ TASK ORDERING RULES (ENFORCED):
 ### Pending
 
 #### Phase 1: Setup (MUST COMPLETE BEFORE IMPLEMENTATION)
-- [ ] Task 1: Install dependencies and verify all quality gates run
-  - Run: \`$install_cmd\`
-  - Verify: All quality gate commands execute (even if they fail)
-  - **Blocker if skipped**: Cannot run backpressure without dependencies
+- [ ] Task 1: Setup project and verify quality gates
+  - Install dependencies (use appropriate package manager for project type)
+  - Run each quality gate command from the Quality Gates section below
+  - If any command fails (not found, wrong syntax), find the correct command
+  - Update this SPEC.md with verified working commands
+  - **Blocker if skipped**: Cannot run backpressure without working quality gates
 
 #### Phase 2: Implementation (Each task includes its own validation)
 [Break down the plan into small tasks. EACH TASK MUST INCLUDE:]
 
 - [ ] Task N: [Create/modify source file]
-  - File: \`src/path/to/file.ts\`
-  - Test: \`tests/unit/file.test.ts\` (CREATE IN SAME ITERATION)
-  - Validate: \`$validate_cmd\`
-  - Visual: (if UI component) \`agent-browser screenshot localhost:PORT/path\`
-
-[Example for a UI component:]
-- [ ] Task N: Create Header component
-  - File: \`src/components/Header.tsx\`
-  - Test: \`tests/unit/Header.test.tsx\` (CREATE IN SAME ITERATION)
-  - Validate: \`$validate_cmd\`
-  - Visual: \`agent-browser screenshot localhost:3000\` (REQUIRED FOR UI)
+  - File: \\\`src/path/to/file.ts\\\`
+  - Test: \\\`tests/unit/file.test.ts\\\` (CREATE IN SAME ITERATION)
+  - Validate: Run quality gates after changes
+  - Visual: (if UI component) \\\`agent-browser screenshot localhost:PORT/path\\\`
 
 #### Phase 3: Integration (After all implementation tasks)
 - [ ] Task N: Run full test suite and verify all integrations work
@@ -2333,7 +2312,11 @@ BACKPRESSURE RULES (ENFORCED):
 - [ ] Related tests pass (the test file you created with the source file)
 
 ### Full Gates (run after each iteration)
-$quality_gates
+[DISCOVER THESE using the priority order above - extract from plan, discover from project, or infer from plan text]
+- [ ] Tests pass: \\\`<discovered command>\\\`
+- [ ] Lint clean: \\\`<discovered command>\\\`
+- [ ] Types check: \\\`<discovered command>\\\`
+- [ ] Build succeeds: \\\`<discovered command>\\\`
 
 ### Visual Gates (run after UI changes)
 - [ ] Screenshot captured with agent-browser
@@ -2358,8 +2341,8 @@ $quality_gates
 
 | Source File | Test File | Visual Check |
 |-------------|-----------|--------------|
-| \`src/path/to/file.ts\` | \`tests/unit/file.test.ts\` | No |
-| \`src/components/UI.tsx\` | \`tests/unit/UI.test.tsx\` | Yes - screenshot |
+| \\\`src/path/to/file.ts\\\` | \\\`tests/unit/file.test.ts\\\` | No |
+| \\\`src/components/UI.tsx\\\` | \\\`tests/unit/UI.test.tsx\\\` | Yes - screenshot |
 
 ### Patterns to Follow
 
@@ -2372,7 +2355,7 @@ $quality_gates
 ## Iteration Log
 
 CRITICAL RULES:
-1. Task 1 MUST ALWAYS be 'Install dependencies' - NEVER start implementation without this
+1. Task 1 MUST setup dependencies AND verify quality gates work - NEVER skip this
 2. EVERY implementation task MUST specify a test file to create IN THE SAME ITERATION
 3. UI tasks MUST include a Visual line with agent-browser command
 4. NEVER create 'run tests' or 'run lint' as separate tasks at the end - these run PER TASK
@@ -2382,6 +2365,7 @@ CRITICAL RULES:
 8. Include file paths where known
 9. Copy any patterns/conventions mentioned in the plan to the Patterns section
 10. DO NOT include placeholder text like 'Requirement 1' - use actual content from the plan
+11. Quality gates MUST have actual commands, not placeholders - discover them!
 
 Write the SPEC.md file now."
 
@@ -2426,7 +2410,11 @@ See plan file for details.
 
 ## Quality Gates
 
-$quality_gates
+<!-- TODO: Discover quality gates in iteration 1 -->
+<!-- Check plan for explicit gates, or discover from project config files -->
+- [ ] Tests pass: \`<discover in iteration 1>\`
+- [ ] Lint clean: \`<discover in iteration 1>\`
+- [ ] Types check: \`<discover in iteration 1>\`
 
 ## Exit Criteria
 
