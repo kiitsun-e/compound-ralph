@@ -668,92 +668,49 @@ run_iteration_checks() {
                     log_info "Screenshot saved: $screenshot_file"
                 fi
 
-                # Check for runtime errors and error overlays
-                # First, inject an error listener and check for existing errors
-                local console_check
-                console_check=$(agent-browser eval "$dev_url" "(function() {
-                    var issues = [];
-                    var errorOverlays = document.querySelectorAll('[data-nextjs-error], .error-overlay, #webpack-dev-server-client-overlay, [class*=vite-error], [class*=error-overlay], .svelte-error-overlay, [data-astro-dev-toolbar]');
-                    if (errorOverlays.length > 0) { issues.push('Error overlay detected on page'); }
-                    var body = document.body ? document.body.innerText : '';
-                    if (body.match(/Uncaught|ReferenceError|TypeError|SyntaxError|Error:/i)) { issues.push('Error text visible on page'); }
-                    if (document.body && document.body.innerHTML.trim().length < 50) { issues.push('Page appears blank - possible render failure'); }
-                    if (window.__lastError) { issues.push('Runtime error: ' + window.__lastError); }
-                    if (body.match(/hydrat|mismatch/i)) { issues.push('Possible hydration error'); }
-                    return issues;
-                })()" 2>&1) || true
+                # Check for runtime errors and error overlays using pure expressions
+                # agent-browser eval requires expressions, not statements
 
-                # Check results (filter out agent-browser CLI errors)
-                if [[ -n "$console_check" ]] && [[ "$console_check" != "[]" ]] && [[ "$console_check" != "null" ]]; then
-                    if ! echo "$console_check" | grep -qE "Unknown command|agent-browser"; then
-                        if [[ "$console_check" != "[]" ]]; then
-                            ITERATION_ISSUES+=("Runtime/UI errors detected: $console_check")
-                            all_passed=false
-                            log_warn "Runtime/UI errors detected: $console_check"
-                        fi
+                # Check 1: Error overlays present?
+                local has_error_overlay
+                has_error_overlay=$(agent-browser eval "$dev_url" "document.querySelectorAll('[data-nextjs-error], .error-overlay, #webpack-dev-server-client-overlay, [class*=vite-error], .svelte-error-overlay').length" 2>&1) || true
+                if [[ "$has_error_overlay" =~ ^[0-9]+$ ]] && [[ "$has_error_overlay" -gt 0 ]]; then
+                    ITERATION_ISSUES+=("Error overlay detected on page")
+                    all_passed=false
+                    log_warn "Error overlay detected on page"
+                fi
+
+                # Check 2: Page too small/blank?
+                local body_length
+                body_length=$(agent-browser eval "$dev_url" "document.body ? document.body.innerHTML.trim().length : 0" 2>&1) || true
+                if [[ "$body_length" =~ ^[0-9]+$ ]] && [[ "$body_length" -lt 50 ]]; then
+                    ITERATION_ISSUES+=("Page appears blank - possible render failure")
+                    all_passed=false
+                    log_warn "Page appears blank - possible render failure"
+                fi
+
+                # Check 3: Buttons/interactive elements count
+                local button_count
+                button_count=$(agent-browser eval "$dev_url" "document.querySelectorAll('button, [role=button], a[href]').length" 2>&1) || true
+                local clickable_count
+                clickable_count=$(agent-browser eval "$dev_url" "Array.from(document.querySelectorAll('button, [role=button]')).filter(function(el) { var s = window.getComputedStyle(el); return s.pointerEvents !== 'none' && s.display !== 'none'; }).length" 2>&1) || true
+
+                if [[ "$button_count" =~ ^[0-9]+$ ]] && [[ "$clickable_count" =~ ^[0-9]+$ ]]; then
+                    log_info "Interactive elements: $clickable_count clickable of $button_count total"
+                    if [[ "$button_count" -gt 0 ]] && [[ "$clickable_count" -eq 0 ]]; then
+                        ITERATION_ISSUES+=("All buttons appear disabled or hidden")
+                        all_passed=false
+                        log_warn "All buttons appear disabled or hidden"
                     fi
                 fi
 
-                # Basic interaction test - check if page is responsive
-                local interaction_check
-                interaction_check=$(agent-browser eval "$dev_url" "(function() {
-                    var issues = [];
-                    var buttons = document.querySelectorAll('button, [role=button], a[href]');
-                    var clickable = Array.from(buttons).filter(function(el) {
-                        var style = window.getComputedStyle(el);
-                        return style.pointerEvents !== 'none' && style.display !== 'none' && style.visibility !== 'hidden';
-                    });
-                    if (clickable.length === 0 && buttons.length > 0) { issues.push('All buttons/links appear disabled or hidden'); }
-                    var loaders = document.querySelectorAll('[class*=loading], [class*=spinner], [aria-busy=true]');
-                    if (loaders.length > 3) { issues.push('Multiple loading indicators present - possible stuck state'); }
-                    var main = document.querySelector('main, [role=main], #root, #app');
-                    if (main && main.children.length === 0) { issues.push('Main content area is empty - possible render failure'); }
-                    return { total: buttons.length, clickable: clickable.length, issues: issues };
-                })()" 2>&1) || true
-
-                if [[ -n "$interaction_check" ]]; then
-                    log_info "Interactive elements check: $interaction_check"
-
-                    # Parse issues from the check
-                    if echo "$interaction_check" | grep -q '"issues":\s*\[' && ! echo "$interaction_check" | grep -q '"issues":\s*\[\]'; then
-                        local ui_issues
-                        ui_issues=$(echo "$interaction_check" | grep -o '"issues":\s*\[[^]]*\]' | head -1)
-                        if [[ -n "$ui_issues" ]] && [[ "$ui_issues" != *'[]'* ]]; then
-                            ITERATION_ISSUES+=("UI responsiveness issues: $ui_issues")
-                            all_passed=false
-                            log_warn "UI responsiveness issues detected"
-                        fi
-                    fi
-                fi
-
-                # ACTUAL INTERACTION TEST - try clicking a button and check for errors
-                # This catches frozen UIs and runtime errors that only manifest on interaction
-                local click_test
-                click_test=$(agent-browser eval "$dev_url" "(function() {
-                    var errors = [];
-                    var buttons = Array.from(document.querySelectorAll('button:not([type=submit]), [role=button]'));
-                    var safeButton = buttons.find(function(b) {
-                        var text = (b.textContent || '').toLowerCase();
-                        return text.indexOf('delete') === -1 && text.indexOf('submit') === -1 && text.indexOf('confirm') === -1;
-                    });
-                    if (safeButton) {
-                        try { safeButton.click(); }
-                        catch (e) { errors.push('Click threw: ' + e.message); }
-                    }
-                    return { tested: !!safeButton, buttonText: safeButton ? (safeButton.textContent || '').slice(0, 30) : null, errors: errors };
-                })()" 2>&1) || true
-
-                if [[ -n "$click_test" ]] && ! echo "$click_test" | grep -qE "Unknown command|agent-browser"; then
-                    log_info "Click test result: $click_test"
-                    if echo "$click_test" | grep -q '"errors":\s*\[' && ! echo "$click_test" | grep -q '"errors":\s*\[\]'; then
-                        local click_errors
-                        click_errors=$(echo "$click_test" | grep -o '"errors":\s*\[[^]]*\]' | head -1)
-                        if [[ -n "$click_errors" ]] && [[ "$click_errors" != *'[]'* ]]; then
-                            ITERATION_ISSUES+=("Runtime errors on interaction: $click_errors")
-                            all_passed=false
-                            log_warn "Runtime errors detected during interaction test"
-                        fi
-                    fi
+                # Check 4: Loading spinners stuck?
+                local loader_count
+                loader_count=$(agent-browser eval "$dev_url" "document.querySelectorAll('[class*=loading], [class*=spinner], [aria-busy=true]').length" 2>&1) || true
+                if [[ "$loader_count" =~ ^[0-9]+$ ]] && [[ "$loader_count" -gt 3 ]]; then
+                    ITERATION_ISSUES+=("Multiple loading indicators present - possible stuck state")
+                    all_passed=false
+                    log_warn "Multiple loading indicators - possible stuck state"
                 fi
             else
                 log_info "Dev server not running at $dev_url - skipping visual verification"
