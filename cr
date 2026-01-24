@@ -519,19 +519,108 @@ check_config_changed() {
 # Run lightweight per-iteration checks (tests + lint on changed files)
 # Extract quality gate commands from SPEC.md
 # Parses the "Quality Gates" section for backtick commands
+# Skips lines marked with [INFORMATIONAL] - those are logged but non-blocking
 # Usage: get_spec_quality_commands "$spec_file"
 get_spec_quality_commands() {
     local spec_file="$1"
     [[ ! -f "$spec_file" ]] && return
 
     # Extract commands from Quality Gates section
+    # Skip lines containing [INFORMATIONAL] - those are non-blocking
     # Look for backtick commands like `bun astro check` or `bun run build`
     awk '/^## Quality Gates/,/^## [^Q]/' "$spec_file" 2>/dev/null | \
+        grep -v '\[INFORMATIONAL\]' | \
         grep -oE '`[^`]+`' | \
         tr -d '`' | \
         grep -E '^(bun|npm|yarn|pnpm|npx|bunx|node|python|ruby|bundle|rails|pytest|rspec|cargo|go) ' | \
         sort -u
 }
+
+# Extract INFORMATIONAL quality gate commands (logged but non-blocking)
+# Usage: get_spec_informational_commands "$spec_file"
+get_spec_informational_commands() {
+    local spec_file="$1"
+    [[ ! -f "$spec_file" ]] && return
+
+    # Extract commands from lines marked [INFORMATIONAL]
+    awk '/^## Quality Gates/,/^## [^Q]/' "$spec_file" 2>/dev/null | \
+        grep '\[INFORMATIONAL\]' | \
+        grep -oE '`[^`]+`' | \
+        tr -d '`' | \
+        grep -E '^(bun|npm|yarn|pnpm|npx|bunx|node|python|ruby|bundle|rails|pytest|rspec|cargo|go) ' | \
+        sort -u
+}
+
+# Track repeated failures across iterations
+# File: .cr/failure_tracking.json
+# Format: {"gate_name": {"count": N, "last_error_hash": "..."}}
+FAILURE_TRACKING_FILE=".cr/failure_tracking.json"
+
+init_failure_tracking() {
+    mkdir -p .cr
+    if [[ ! -f "$FAILURE_TRACKING_FILE" ]]; then
+        echo '{}' > "$FAILURE_TRACKING_FILE"
+    fi
+}
+
+# Record a failure and return how many times this gate has failed consecutively
+# Usage: record_gate_failure "gate_command" "error_output"
+# Returns: failure count for this gate
+record_gate_failure() {
+    local gate="$1"
+    local error_output="$2"
+    init_failure_tracking
+
+    # Create a hash of the error to detect if it's the same error
+    local error_hash
+    error_hash=$(echo "$error_output" | head -5 | md5sum | cut -d' ' -f1 2>/dev/null || echo "unknown")
+
+    # Safe key for JSON (replace special chars)
+    local safe_gate
+    safe_gate=$(echo "$gate" | tr -c '[:alnum:]' '_')
+
+    if command -v jq &>/dev/null; then
+        local current_count current_hash
+        current_count=$(jq -r ".\"$safe_gate\".count // 0" "$FAILURE_TRACKING_FILE" 2>/dev/null || echo "0")
+        current_hash=$(jq -r ".\"$safe_gate\".last_error_hash // \"\"" "$FAILURE_TRACKING_FILE" 2>/dev/null || echo "")
+
+        # If same error, increment count; if different error, reset to 1
+        local new_count
+        if [[ "$current_hash" == "$error_hash" ]]; then
+            new_count=$((current_count + 1))
+        else
+            new_count=1
+        fi
+
+        # Update tracking
+        jq --arg gate "$safe_gate" --argjson count "$new_count" --arg hash "$error_hash" \
+           '.[$gate] = {"count": $count, "last_error_hash": $hash}' \
+           "$FAILURE_TRACKING_FILE" > "$FAILURE_TRACKING_FILE.tmp" && \
+           mv "$FAILURE_TRACKING_FILE.tmp" "$FAILURE_TRACKING_FILE"
+
+        echo "$new_count"
+    else
+        echo "1"
+    fi
+}
+
+# Clear failure tracking for a gate (call when it passes)
+# Usage: clear_gate_failure "gate_command"
+clear_gate_failure() {
+    local gate="$1"
+    init_failure_tracking
+
+    local safe_gate
+    safe_gate=$(echo "$gate" | tr -c '[:alnum:]' '_')
+
+    if command -v jq &>/dev/null; then
+        jq "del(.\"$safe_gate\")" "$FAILURE_TRACKING_FILE" > "$FAILURE_TRACKING_FILE.tmp" && \
+           mv "$FAILURE_TRACKING_FILE.tmp" "$FAILURE_TRACKING_FILE"
+    fi
+}
+
+# Maximum times a gate can fail with the same error before we warn about it
+MAX_REPEATED_FAILURES=5
 
 # Returns 0 if all pass, 1 if any fail
 # Sets ITERATION_ISSUES array with failures
@@ -576,6 +665,7 @@ run_iteration_checks() {
     if [[ -n "$spec_file" ]] && [[ -f "$spec_file" ]]; then
         log_info "Reading quality gates from: $spec_file"
 
+        # Run blocking quality gates
         while IFS= read -r cmd; do
             [[ -z "$cmd" ]] && continue
 
@@ -586,11 +676,44 @@ run_iteration_checks() {
             log_info "Running quality gate: $cmd"
             spec_commands_run=$((spec_commands_run + 1))
 
-            if ! eval "$cmd" 2>&1 | tail -20; then
+            # Capture output for failure tracking
+            local gate_output
+            gate_output=$(eval "$cmd" 2>&1 | tail -50)
+            local gate_exit_code=${PIPESTATUS[0]}
+
+            echo "$gate_output" | tail -20
+
+            if [[ $gate_exit_code -ne 0 ]]; then
+                # Track how many times this gate has failed with same error
+                local failure_count
+                failure_count=$(record_gate_failure "$cmd" "$gate_output")
+
                 ITERATION_ISSUES+=("Quality gate failed: $cmd")
                 all_passed=false
+
+                # Warn if this gate keeps failing with the same error
+                if [[ "$failure_count" -ge "$MAX_REPEATED_FAILURES" ]]; then
+                    log_warn "Gate '$cmd' has failed $failure_count times with same error!"
+                    log_warn "The agent MUST fix this error, not ignore it."
+                    log_warn "If truly unfixable, mark as [INFORMATIONAL] in SPEC.md"
+                fi
+            else
+                # Gate passed - clear failure tracking
+                clear_gate_failure "$cmd"
             fi
         done < <(get_spec_quality_commands "$spec_file")
+
+        # Run informational gates (logged but non-blocking)
+        while IFS= read -r cmd; do
+            [[ -z "$cmd" ]] && continue
+            [[ "$cmd" == *"screenshot"* ]] && continue
+            [[ "$cmd" == *"agent-browser"* ]] && continue
+
+            log_info "Running informational gate: $cmd"
+            if ! eval "$cmd" 2>&1 | tail -10; then
+                log_warn "Informational gate failed (non-blocking): $cmd"
+            fi
+        done < <(get_spec_informational_commands "$spec_file")
     fi
 
     # FALLBACK: If no SPEC commands found, warn and use minimal project.json detection
@@ -2931,16 +3054,44 @@ Start by reading both files now."
                 for issue in "${ITERATION_ISSUES[@]}"; do
                     log_warn "  - $issue"
                 done
+                echo ""
+                log_error "=== COMPLETION REJECTED ==="
+                log_error "You MUST fix these errors before completion is accepted."
+                log_error ""
+                log_error "DO NOT:"
+                log_error "  - Dismiss errors as 'pre-existing'"
+                log_error "  - Signal <loop-complete> again without fixing"
+                log_error "  - Add documentation instead of fixing"
+                log_error ""
+                log_error "DO:"
+                log_error "  - Read the actual error messages"
+                log_error "  - Fix the root cause of each error"
+                log_error "  - Run the quality gate again to verify"
+                log_error ""
+                log_error "If a gate is TRULY unfixable (requires external API key, etc.):"
+                log_error "  - Mark it as [INFORMATIONAL] in SPEC.md Quality Gates"
+                log_error "  - Example: '- [ ] [INFORMATIONAL] External API: \`curl ...\`'"
+                log_error ""
                 log_info "Continuing loop to address issues..."
 
-                # Add issues to SPEC for next iteration
+                # Add issues to SPEC for next iteration with clear instructions
                 {
                     echo ""
-                    echo "### Per-Iteration Check Failures (Auto-added)"
-                    echo "Claude signaled completion but these checks failed:"
+                    echo "### Quality Gate Failures - MUST FIX (Auto-added iteration $iteration)"
+                    echo ""
+                    echo "**These errors MUST be fixed before completion will be accepted.**"
+                    echo ""
+                    echo "Do NOT:"
+                    echo "- Dismiss as 'pre-existing' - fix them anyway"
+                    echo "- Signal completion again without fixing"
+                    echo "- Document the errors instead of fixing them"
+                    echo ""
+                    echo "Failing gates:"
                     for issue in "${ITERATION_ISSUES[@]}"; do
-                        echo "- [ ] Fix: $issue"
+                        echo "- [ ] $issue"
                     done
+                    echo ""
+                    echo "Read the error output above, understand what's wrong, and fix it."
                 } >> "$spec_file"
 
                 sleep "$ITERATION_DELAY"

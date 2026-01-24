@@ -386,10 +386,38 @@ bun run build || npm run build || bundle exec rails assets:precompile || true
 |--------------|--------|
 | Quick fix (obvious) | Fix NOW in this iteration |
 | Test environment issue | Fix environment, re-run |
-| Complex/unclear | Note in SPEC, continue if non-blocking |
-| Blocker | Move task to "Blocked", document why |
+| Complex/unclear | Investigate, understand, then fix |
+| "Pre-existing" errors | **FIX THEM ANYWAY** - we produce production-grade code |
 
-**HARD RULE:** Do not mark a task complete if its tests don't pass.
+**HARD RULES:**
+1. Do not mark a task complete if its tests don't pass
+2. Do not dismiss errors as "pre-existing" - fix them
+3. Do not signal `<loop-complete>` if ANY quality gate fails
+
+### Handling "Pre-existing" Errors
+
+**There is no such thing as "not my problem" in this loop.**
+
+If a quality gate fails, you fix it. Period. Even if the errors existed before your feature:
+- The goal is **production-grade code**, not "code that doesn't make things worse"
+- Type errors, lint errors, test failures - all must be resolved
+- "It was already broken" is not an acceptable excuse
+
+**How to fix pre-existing errors:**
+1. Read the actual error messages carefully
+2. Understand what the error is asking for
+3. Fix the root cause, not just the symptom
+4. If it's a type error, fix the types
+5. If it's a test failure, fix the test or the code
+6. If it's a lint error, fix the code style
+
+**The ONLY valid exceptions (mark as `[INFORMATIONAL]` in SPEC.md):**
+- Requires paid API key you don't have
+- Requires external service that's not running
+- Requires hardware you don't have access to
+
+Type errors in test files? **Fix them.**
+800 errors from `astro check`? **Fix them one by one if needed.**
 
 ---
 
@@ -593,6 +621,23 @@ The next iteration will continue automatically. Do not output the completion sig
 ```
 ❌ Silent failures, undocumented workarounds
 ✅ Every issue noted in SPEC.md Notes section
+```
+
+### 7. Fix ALL Errors (No Exceptions)
+```
+❌ "These are pre-existing errors, not my problem"
+❌ "There are 800 errors, that's too many"
+❌ "The build passes so the type errors don't matter"
+✅ Quality gate fails → Read errors → Fix them → ALL of them
+✅ Production-grade code has ZERO quality gate failures
+```
+
+### 8. No Completion With Failures
+```
+❌ Signal <loop-complete> while quality gates fail
+❌ Hope the outer loop will accept it anyway
+✅ Fix every failure BEFORE signaling completion
+✅ If you can't fix it, you're not done
 ```
 
 ---
