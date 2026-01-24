@@ -712,6 +712,35 @@ run_iteration_checks() {
                     all_passed=false
                     log_warn "Multiple loading indicators - possible stuck state"
                 fi
+
+                # Check 5: Page responsiveness - frozen/OOM pages will be slow or timeout
+                local start_time end_time duration
+                start_time=$(date +%s%3N)
+                local responsive_check
+                responsive_check=$(timeout 5 agent-browser eval "$dev_url" "Date.now()" 2>&1) || true
+                end_time=$(date +%s%3N)
+                duration=$((end_time - start_time))
+
+                if [[ "$duration" -gt 3000 ]]; then
+                    ITERATION_ISSUES+=("Page slow to respond (${duration}ms) - possible freeze or OOM")
+                    all_passed=false
+                    log_warn "Page slow to respond (${duration}ms) - possible freeze/OOM"
+                elif [[ -z "$responsive_check" ]] || [[ "$responsive_check" == *"timeout"* ]]; then
+                    ITERATION_ISSUES+=("Page unresponsive - possible freeze or OOM")
+                    all_passed=false
+                    log_warn "Page unresponsive - possible freeze/OOM"
+                else
+                    log_info "Page responsive (${duration}ms)"
+                fi
+
+                # Check 6: Look for visible error text (Uncaught, Error:, etc)
+                local error_text_check
+                error_text_check=$(agent-browser eval "$dev_url" "document.body && document.body.innerText.match(/Uncaught|ReferenceError|TypeError|SyntaxError|RangeError|out of memory|OOM/i) ? 'ERROR_FOUND' : 'OK'" 2>&1) || true
+                if [[ "$error_text_check" == "ERROR_FOUND" ]]; then
+                    ITERATION_ISSUES+=("Error text visible on page")
+                    all_passed=false
+                    log_warn "Error text visible on page"
+                fi
             else
                 log_info "Dev server not running at $dev_url - skipping visual verification"
             fi
