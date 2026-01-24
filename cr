@@ -671,46 +671,17 @@ run_iteration_checks() {
                 # Check for runtime errors and error overlays
                 # First, inject an error listener and check for existing errors
                 local console_check
-                console_check=$(agent-browser eval "$dev_url" "
-                    const issues = [];
-
-                    // Check for framework error overlays (React, Next.js, Vite, etc.)
-                    const errorOverlays = document.querySelectorAll(
-                        '[data-nextjs-error], ' +
-                        '.error-overlay, ' +
-                        '#webpack-dev-server-client-overlay, ' +
-                        '[class*=\"vite-error\"], ' +
-                        '[class*=\"error-overlay\"], ' +
-                        '.svelte-error-overlay, ' +
-                        '[data-astro-dev-toolbar]'
-                    );
-                    if (errorOverlays.length > 0) {
-                        issues.push('Error overlay detected on page');
-                    }
-
-                    // Check for visible error text in the DOM
-                    const body = document.body ? document.body.innerText : '';
-                    if (body.match(/Uncaught|ReferenceError|TypeError|SyntaxError|Error:/i)) {
-                        issues.push('Error text visible on page');
-                    }
-
-                    // Check for completely blank page (render failure)
-                    if (document.body && document.body.innerHTML.trim().length < 50) {
-                        issues.push('Page appears blank - possible render failure');
-                    }
-
-                    // Check if any existing error was captured by window.onerror
-                    if (window.__lastError) {
-                        issues.push('Runtime error: ' + window.__lastError);
-                    }
-
-                    // Check for hydration errors (common in SSR frameworks)
-                    if (body.match(/hydrat|mismatch/i)) {
-                        issues.push('Possible hydration error');
-                    }
-
+                console_check=$(agent-browser eval "$dev_url" "(function() {
+                    var issues = [];
+                    var errorOverlays = document.querySelectorAll('[data-nextjs-error], .error-overlay, #webpack-dev-server-client-overlay, [class*=vite-error], [class*=error-overlay], .svelte-error-overlay, [data-astro-dev-toolbar]');
+                    if (errorOverlays.length > 0) { issues.push('Error overlay detected on page'); }
+                    var body = document.body ? document.body.innerText : '';
+                    if (body.match(/Uncaught|ReferenceError|TypeError|SyntaxError|Error:/i)) { issues.push('Error text visible on page'); }
+                    if (document.body && document.body.innerHTML.trim().length < 50) { issues.push('Page appears blank - possible render failure'); }
+                    if (window.__lastError) { issues.push('Runtime error: ' + window.__lastError); }
+                    if (body.match(/hydrat|mismatch/i)) { issues.push('Possible hydration error'); }
                     return issues;
-                " 2>&1) || true
+                })()" 2>&1) || true
 
                 # Check results (filter out agent-browser CLI errors)
                 if [[ -n "$console_check" ]] && [[ "$console_check" != "[]" ]] && [[ "$console_check" != "null" ]]; then
@@ -725,39 +696,20 @@ run_iteration_checks() {
 
                 # Basic interaction test - check if page is responsive
                 local interaction_check
-                interaction_check=$(agent-browser eval "$dev_url" "
-                    const issues = [];
-
-                    // Check for buttons/links
-                    const buttons = document.querySelectorAll('button, [role=button], a[href]');
-                    const clickable = Array.from(buttons).filter(el => {
-                        const style = window.getComputedStyle(el);
+                interaction_check=$(agent-browser eval "$dev_url" "(function() {
+                    var issues = [];
+                    var buttons = document.querySelectorAll('button, [role=button], a[href]');
+                    var clickable = Array.from(buttons).filter(function(el) {
+                        var style = window.getComputedStyle(el);
                         return style.pointerEvents !== 'none' && style.display !== 'none' && style.visibility !== 'hidden';
                     });
-
-                    // Check if page seems frozen (no interactive elements or all disabled)
-                    if (clickable.length === 0 && buttons.length > 0) {
-                        issues.push('All buttons/links appear disabled or hidden');
-                    }
-
-                    // Check for infinite loading states
-                    const loaders = document.querySelectorAll('[class*=loading], [class*=spinner], [aria-busy=true]');
-                    if (loaders.length > 3) {
-                        issues.push('Multiple loading indicators present - possible stuck state');
-                    }
-
-                    // Check for empty main content (possible render failure)
-                    const main = document.querySelector('main, [role=main], #root, #app');
-                    if (main && main.children.length === 0) {
-                        issues.push('Main content area is empty - possible render failure');
-                    }
-
-                    return {
-                        total: buttons.length,
-                        clickable: clickable.length,
-                        issues: issues
-                    };
-                " 2>&1) || true
+                    if (clickable.length === 0 && buttons.length > 0) { issues.push('All buttons/links appear disabled or hidden'); }
+                    var loaders = document.querySelectorAll('[class*=loading], [class*=spinner], [aria-busy=true]');
+                    if (loaders.length > 3) { issues.push('Multiple loading indicators present - possible stuck state'); }
+                    var main = document.querySelector('main, [role=main], #root, #app');
+                    if (main && main.children.length === 0) { issues.push('Main content area is empty - possible render failure'); }
+                    return { total: buttons.length, clickable: clickable.length, issues: issues };
+                })()" 2>&1) || true
 
                 if [[ -n "$interaction_check" ]]; then
                     log_info "Interactive elements check: $interaction_check"
@@ -777,44 +729,19 @@ run_iteration_checks() {
                 # ACTUAL INTERACTION TEST - try clicking a button and check for errors
                 # This catches frozen UIs and runtime errors that only manifest on interaction
                 local click_test
-                click_test=$(agent-browser eval "$dev_url" "
-                    return new Promise((resolve) => {
-                        // Set up error listener before interaction
-                        let errorsCaught = [];
-                        const origError = window.onerror;
-                        window.onerror = function(msg, src, line, col, err) {
-                            errorsCaught.push(msg);
-                            if (origError) origError.apply(this, arguments);
-                            return false;
-                        };
-
-                        // Find a button to click (prefer ones that look safe - not submit/delete)
-                        const buttons = Array.from(document.querySelectorAll('button:not([type=submit]), [role=button]'));
-                        const safeButton = buttons.find(b => {
-                            const text = (b.textContent || '').toLowerCase();
-                            return !text.includes('delete') && !text.includes('submit') && !text.includes('confirm');
-                        });
-
-                        if (safeButton) {
-                            try {
-                                // Try to click and see if it throws
-                                safeButton.click();
-                            } catch (e) {
-                                errorsCaught.push('Click threw: ' + e.message);
-                            }
-                        }
-
-                        // Wait a moment for any async errors
-                        setTimeout(() => {
-                            window.onerror = origError;
-                            resolve({
-                                tested: !!safeButton,
-                                buttonText: safeButton ? safeButton.textContent?.slice(0, 30) : null,
-                                errors: errorsCaught
-                            });
-                        }, 500);
+                click_test=$(agent-browser eval "$dev_url" "(function() {
+                    var errors = [];
+                    var buttons = Array.from(document.querySelectorAll('button:not([type=submit]), [role=button]'));
+                    var safeButton = buttons.find(function(b) {
+                        var text = (b.textContent || '').toLowerCase();
+                        return text.indexOf('delete') === -1 && text.indexOf('submit') === -1 && text.indexOf('confirm') === -1;
                     });
-                " 2>&1) || true
+                    if (safeButton) {
+                        try { safeButton.click(); }
+                        catch (e) { errors.push('Click threw: ' + e.message); }
+                    }
+                    return { tested: !!safeButton, buttonText: safeButton ? (safeButton.textContent || '').slice(0, 30) : null, errors: errors };
+                })()" 2>&1) || true
 
                 if [[ -n "$click_test" ]] && ! echo "$click_test" | grep -qE "Unknown command|agent-browser"; then
                     log_info "Click test result: $click_test"
