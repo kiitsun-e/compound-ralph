@@ -173,6 +173,45 @@ bun run build --help 2>/dev/null || npm run build -- --help 2>/dev/null
 **HARD RULE:** Do not proceed to implementation if the environment is broken.
 Fix it first, or document the blocker in SPEC.md.
 
+### 1.6 Verify Quality Gates (REQUIRED)
+
+Check if SPEC.md quality gates are marked `<!-- PROVISIONAL -->` or contain placeholders like `<discover in iteration 1>`:
+
+1. **Try each quality gate command:**
+   ```bash
+   # Run whatever commands are listed in SPEC.md Quality Gates section
+   # Example for a Node.js project:
+   bun test --run        # Does this work?
+   bun run lint          # Does this work?
+   tsc --noEmit          # Does this work?
+   ```
+
+2. **If a command fails because it doesn't exist:**
+   - Find the correct command for this project
+   - Common fixes:
+     - `astro check` → `bunx astro check` or `npx astro check`
+     - `tsc` → `bunx tsc` or `npx tsc`
+     - `jest` → `npx jest` or check package.json scripts
+     - `vitest` → `vitest run` (add --run to prevent watch mode)
+   - Check package.json/Gemfile/pyproject.toml scripts for actual command names
+   - For framework-specific commands, check the framework's CLI docs
+
+3. **Update SPEC.md with verified commands:**
+   - Remove the `<!-- PROVISIONAL -->` or `<!-- TODO -->` comments
+   - Replace placeholder commands with working ones
+   - Add any additional quality gates you discovered
+   - Format: `- [ ] Description: \`actual working command\``
+
+4. **Commit the verified setup:**
+   ```bash
+   git add SPEC.md
+   git commit -m "chore: verify and update quality gates"
+   ```
+
+**HARD RULE:** Do NOT proceed to Phase 2 implementation until all quality gate commands execute successfully.
+The commands can report failures (failing tests, lint errors), but they must RUN.
+If a command is "not found", fix it first.
+
 ---
 
 ## Phase 2: Orient (LOAD CONTEXT)
