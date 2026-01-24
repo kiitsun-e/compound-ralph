@@ -691,6 +691,15 @@ run_iteration_checks() {
                 ITERATION_ISSUES+=("Quality gate failed: $cmd")
                 all_passed=false
 
+                # Save the actual error output so it can be injected into next iteration
+                # This is CRITICAL - the agent needs to SEE the errors to fix them
+                mkdir -p .cr
+                {
+                    echo "=== FAILED GATE: $cmd ==="
+                    echo "$gate_output"
+                    echo ""
+                } >> .cr/gate_failures.txt
+
                 # Warn if this gate keeps failing with the same error
                 if [[ "$failure_count" -ge "$MAX_REPEATED_FAILURES" ]]; then
                     log_warn "Gate '$cmd' has failed $failure_count times with same error!"
@@ -923,6 +932,41 @@ run_iteration_checks() {
     fi
 }
 
+# Check if a learning is harmful and should be rejected
+# Returns 0 (true) if the learning should be blocked
+# Harmful patterns: encourage skipping, ignoring, or dismissing quality gate failures
+is_harmful_learning() {
+    local learning="$1"
+    local learning_lower
+    learning_lower=$(echo "$learning" | tr '[:upper:]' '[:lower:]')
+
+    # Block patterns that encourage skipping/ignoring quality gates
+    local harmful_patterns=(
+        "pre-existing.*skip"
+        "pre-existing.*ignore"
+        "pre-existing.*resolve.*immediately"
+        "skip.*check"
+        "skip.*gate"
+        "ignore.*failure"
+        "ignore.*error"
+        "mark.*resolved.*immediately"
+        "resolve.*by updating documentation"
+        "doesn't affect runtime"
+        "documentation rather than.*fix"
+        "not affect.*runtime"
+    )
+
+    for pattern in "${harmful_patterns[@]}"; do
+        if echo "$learning_lower" | grep -qE "$pattern"; then
+            log_warn "BLOCKED harmful learning: $learning"
+            log_warn "Quality gates must NEVER be skipped or ignored"
+            return 0  # true - is harmful
+        fi
+    done
+
+    return 1  # false - not harmful
+}
+
 # Add a learning to .cr/learnings.json
 # Usage: add_learning "category" "learning text" "file1,file2"
 add_learning() {
@@ -931,6 +975,12 @@ add_learning() {
     local files="${3:-}"
     local spec="${4:-unknown}"
     local iteration="${5:-0}"
+
+    # FILTER: Reject harmful learnings that encourage skipping quality gates
+    if is_harmful_learning "$learning"; then
+        log_warn "Rejected harmful learning - quality gates must always be fixed, never skipped"
+        return 0
+    fi
 
     mkdir -p .cr
     local learnings_file=".cr/learnings.json"
@@ -2818,6 +2868,22 @@ cmd_implement() {
     init_context
     prune_context
 
+    # Check if PROMPT.md is outdated compared to template
+    local prompt_file="$spec_dir/PROMPT.md"
+    local template_file="$CR_DIR/templates/PROMPT-template.md"
+    if [[ -f "$prompt_file" ]] && [[ -f "$template_file" ]]; then
+        local prompt_time template_time
+        prompt_time=$(stat -f %m "$prompt_file" 2>/dev/null || stat -c %Y "$prompt_file" 2>/dev/null || echo 0)
+        template_time=$(stat -f %m "$template_file" 2>/dev/null || stat -c %Y "$template_file" 2>/dev/null || echo 0)
+
+        if [[ "$template_time" -gt "$prompt_time" ]]; then
+            log_warn "PROMPT.md is older than the template and may be missing recent improvements"
+            log_warn "Run 'cr spec <plan-file> --force' to regenerate from latest template"
+            log_warn "Or run 'cr reset-context $spec_dir' to clear accumulated context"
+            echo ""
+        fi
+    fi
+
     log_step "Starting Compound Ralph Loop"
     echo "Spec:           $spec_file"
     echo "Max iterations: $MAX_ITERATIONS"
@@ -2884,6 +2950,9 @@ cmd_implement() {
         echo ""
         echo -e "${CYAN}${BOLD}=== Iteration $iteration ($timestamp) ===${NC}"
         echo ""
+
+        # Clear gate failures from previous iteration (each iteration gets fresh tracking)
+        rm -f .cr/gate_failures.txt
 
         # Log file for this iteration
         local log_file="$history_dir/$(printf '%03d' $iteration)-$(date '+%Y%m%d-%H%M%S').md"
@@ -3091,7 +3160,19 @@ Start by reading both files now."
                         echo "- [ ] $issue"
                     done
                     echo ""
-                    echo "Read the error output above, understand what's wrong, and fix it."
+
+                    # Include ACTUAL ERROR OUTPUT so agent knows what to fix
+                    if [[ -f ".cr/gate_failures.txt" ]]; then
+                        echo "**Actual error output (READ THIS TO UNDERSTAND WHAT TO FIX):**"
+                        echo ""
+                        echo '```'
+                        # Include up to 100 lines of errors (enough context, not overwhelming)
+                        head -100 .cr/gate_failures.txt
+                        echo '```'
+                        echo ""
+                    fi
+
+                    echo "Fix these specific errors. Do not proceed until they are resolved."
                 } >> "$spec_file"
 
                 sleep "$ITERATION_DELAY"
@@ -4721,6 +4802,113 @@ cmd_learnings() {
 }
 
 #=============================================================================
+# RESET CONTEXT COMMAND
+#=============================================================================
+
+cmd_reset_context() {
+    local spec_dir="${1:-}"
+
+    if [[ -z "$spec_dir" ]]; then
+        log_error "Usage: cr reset-context <spec-dir>"
+        log_info "Example: cr reset-context specs/feat-task-manager/"
+        exit 1
+    fi
+
+    # Normalize path
+    spec_dir="${spec_dir%/}"  # Remove trailing slash
+    if [[ ! -d "$spec_dir" ]]; then
+        log_error "Spec directory not found: $spec_dir"
+        exit 1
+    fi
+
+    local prompt_file="$spec_dir/PROMPT.md"
+    if [[ ! -f "$prompt_file" ]]; then
+        log_error "PROMPT.md not found in $spec_dir"
+        exit 1
+    fi
+
+    log_warn "This will reset all accumulated context in $spec_dir/PROMPT.md"
+    log_warn "Use this when the agent has learned harmful patterns (e.g., skipping quality gates)"
+    echo ""
+
+    # Create backup
+    cp "$prompt_file" "$prompt_file.backup.$(date +%Y%m%d-%H%M%S)"
+    log_info "Created backup of PROMPT.md"
+
+    # Replace the context between markers with fresh empty context
+    if grep -q "<!-- CONTEXT_START -->" "$prompt_file" 2>/dev/null; then
+        local fresh_context="## Accumulated Context (from previous iterations)
+
+### Learnings
+(No learnings yet - this context was reset)
+
+### Errors You've Fixed Before (Don't Repeat)
+(None yet)
+
+### Patterns Discovered in This Codebase
+(None yet)"
+
+        # Write fresh context to temp file
+        local ctx_temp
+        ctx_temp=$(mktemp)
+        printf '%s\n' "$fresh_context" > "$ctx_temp"
+
+        # Use awk to replace content between markers
+        awk -v ctxfile="$ctx_temp" '
+            BEGIN {
+                while ((getline line < ctxfile) > 0) {
+                    ctx = ctx (ctx ? "\n" : "") line
+                }
+                close(ctxfile)
+            }
+            /<!-- CONTEXT_START -->/ {
+                print
+                print ctx
+                skip = 1
+                next
+            }
+            /<!-- CONTEXT_END -->/ {
+                skip = 0
+            }
+            !skip { print }
+        ' "$prompt_file" > "$prompt_file.tmp" && mv "$prompt_file.tmp" "$prompt_file"
+
+        rm -f "$ctx_temp"
+        log_success "Reset accumulated context in PROMPT.md"
+    else
+        log_warn "No context markers found in PROMPT.md - nothing to reset"
+    fi
+
+    # Also reset .cr/learnings.json if it exists and relates to this spec
+    local learnings_file=".cr/learnings.json"
+    if [[ -f "$learnings_file" ]] && command -v jq &>/dev/null; then
+        local spec_name
+        spec_name=$(basename "$spec_dir")
+        # Filter out learnings for this spec that contain harmful patterns
+        jq --arg spec "$spec_name" '
+            .learnings = [.learnings[] | select(
+                (.spec != $spec) or
+                ((.learning | test("pre-existing|skip|ignore|dismiss"; "i")) | not)
+            )]
+        ' "$learnings_file" > "$learnings_file.tmp" && mv "$learnings_file.tmp" "$learnings_file"
+        log_info "Cleaned harmful learnings from .cr/learnings.json"
+    fi
+
+    # Also reset context.yaml if it exists
+    if [[ -f "$CONTEXT_FILE" ]] && command -v yq &>/dev/null; then
+        # Filter out harmful patterns
+        yq -i '.learnings = [.learnings[] | select(. | test("pre-existing|skip|ignore|dismiss"; "i") | not)]' "$CONTEXT_FILE" 2>/dev/null || true
+        yq -i '.errors_fixed = [.errors_fixed[] | select(.fix | test("skip|ignore|dismiss"; "i") | not)]' "$CONTEXT_FILE" 2>/dev/null || true
+        yq -i '.patterns_discovered = [.patterns_discovered[] | select(. | test("pre-existing|skip|ignore|dismiss"; "i") | not)]' "$CONTEXT_FILE" 2>/dev/null || true
+        log_info "Cleaned harmful patterns from .cr/context.yaml"
+    fi
+
+    log_success "Context reset complete"
+    log_info "The agent will start fresh without harmful learned patterns"
+    log_info "Run 'cr implement $spec_dir' to continue"
+}
+
+#=============================================================================
 # HELP COMMAND
 #=============================================================================
 
@@ -4784,6 +4972,11 @@ COMMANDS:
     learnings [cat]     View project learnings from .cr/learnings.json
         [limit]         Number of entries to show (default: 20)
                         Categories: environment, pattern, gotcha, fix, discovery
+
+    reset-context       Reset accumulated context for a stuck spec
+        <spec-dir>      Use when agent has learned harmful patterns
+                        (e.g., dismissing errors as "pre-existing")
+                        Clears bad learnings, allows fresh start
 
     help                Show this help
 
@@ -4888,6 +5081,9 @@ main() {
             ;;
         learnings)
             cmd_learnings "$@"
+            ;;
+        reset-context)
+            cmd_reset_context "$@"
             ;;
         help|--help|-h)
             cmd_help

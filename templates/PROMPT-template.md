@@ -705,6 +705,18 @@ FIXED: "Cannot read property 'id' of undefined" → Added null check before acce
 
 Output these markers at the END of your work, before the completion signal if applicable. They help future iterations learn from your work.
 
+**FORBIDDEN LEARNINGS (NEVER OUTPUT THESE):**
+```
+❌ LEARNING: Pre-existing errors can be skipped
+❌ LEARNING: This check doesn't affect runtime so skip it
+❌ PATTERN: Resolve by updating documentation rather than fixing
+❌ PATTERN: Mark pre-existing issues as resolved immediately
+❌ FIXED: <error> → Skip this check / Ignore this error
+```
+
+The context system will REJECT learnings that encourage skipping quality gates.
+If a quality gate fails, the learning should be "FIXED: error → how I fixed it", NOT "skip it".
+
 ---
 
 ## Completion Signal
