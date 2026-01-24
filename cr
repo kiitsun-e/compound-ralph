@@ -664,20 +664,28 @@ run_iteration_checks() {
                 sleep 2  # Wait for page to load
 
                 # Discover all pages via navigation links (like cr design does)
-                local all_pages
-                all_pages=$(agent-browser eval "Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a, main a')).map(a => a.href).filter(h => h && h.startsWith(window.location.origin)).filter((v,i,a) => a.indexOf(v) === i).join(' ')" 2>&1) || true
+                local all_pages_raw all_pages
+                all_pages_raw=$(agent-browser eval "Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a, main a')).map(a => a.href).filter(h => h && h.startsWith(window.location.origin)).filter((v,i,a) => a.indexOf(v) === i).join('|')" 2>&1) || true
+
+                # Clean up the output: remove quotes, convert | to newlines
+                all_pages=$(echo "$all_pages_raw" | tr -d '"' | tr -d "'" | tr '|' '\n')
 
                 # Build list of pages to check (base URL + discovered pages, max 5)
                 local pages_to_check=("$dev_url")
                 if [[ -n "$all_pages" ]] && [[ "$all_pages" != *"error"* ]]; then
                     local page_count=0
-                    for page in $all_pages; do
+                    while IFS= read -r page; do
+                        # Clean the URL
+                        page=$(echo "$page" | xargs)
+                        [[ -z "$page" ]] && continue
+                        [[ "$page" != http* ]] && continue
                         [[ "$page" == "$dev_url" ]] && continue
                         [[ "$page" == "$dev_url/" ]] && continue
+                        [[ "$page" == *"#"* ]] && continue  # Skip anchor links
                         pages_to_check+=("$page")
                         page_count=$((page_count + 1))
                         [[ $page_count -ge 4 ]] && break  # Max 4 additional pages
-                    done
+                    done <<< "$all_pages"
                 fi
 
                 log_info "Checking ${#pages_to_check[@]} pages: ${pages_to_check[*]}"
