@@ -715,22 +715,22 @@ run_iteration_checks() {
 
                 # Check 5: Page responsiveness - frozen/OOM pages will be slow or timeout
                 local start_time end_time duration
-                start_time=$(date +%s%3N)
+                start_time=$(date +%s)
                 local responsive_check
                 responsive_check=$(timeout 5 agent-browser eval "$dev_url" "Date.now()" 2>&1) || true
-                end_time=$(date +%s%3N)
+                end_time=$(date +%s)
                 duration=$((end_time - start_time))
 
-                if [[ "$duration" -gt 3000 ]]; then
-                    ITERATION_ISSUES+=("Page slow to respond (${duration}ms) - possible freeze or OOM")
+                if [[ "$duration" -gt 3 ]]; then
+                    ITERATION_ISSUES+=("Page slow to respond (${duration}s) - possible freeze or OOM")
                     all_passed=false
-                    log_warn "Page slow to respond (${duration}ms) - possible freeze/OOM"
+                    log_warn "Page slow to respond (${duration}s) - possible freeze/OOM"
                 elif [[ -z "$responsive_check" ]] || [[ "$responsive_check" == *"timeout"* ]]; then
                     ITERATION_ISSUES+=("Page unresponsive - possible freeze or OOM")
                     all_passed=false
                     log_warn "Page unresponsive - possible freeze/OOM"
                 else
-                    log_info "Page responsive (${duration}ms)"
+                    log_info "Page responsive (${duration}s)"
                 fi
 
                 # Check 6: Look for visible error text (Uncaught, Error:, etc)
