@@ -668,33 +668,64 @@ run_iteration_checks() {
                     log_info "Screenshot saved: $screenshot_file"
                 fi
 
-                # Check for console errors using agent-browser
+                # Check for runtime errors and error overlays
+                # First, inject an error listener and check for existing errors
                 local console_check
-                console_check=$(agent-browser execute "$dev_url" "
-                    // Capture any errors that happened
-                    const errors = window.__CONSOLE_ERRORS__ || [];
-                    // Also check for React/framework error overlays
-                    const errorOverlay = document.querySelector('[data-nextjs-error], .error-overlay, #webpack-dev-server-client-overlay');
-                    if (errorOverlay) errors.push('Error overlay detected on page');
-                    // Check for frozen UI (event loop blocked)
-                    return errors;
+                console_check=$(agent-browser eval "$dev_url" "
+                    const issues = [];
+
+                    // Check for framework error overlays (React, Next.js, Vite, etc.)
+                    const errorOverlays = document.querySelectorAll(
+                        '[data-nextjs-error], ' +
+                        '.error-overlay, ' +
+                        '#webpack-dev-server-client-overlay, ' +
+                        '[class*=\"vite-error\"], ' +
+                        '[class*=\"error-overlay\"], ' +
+                        '.svelte-error-overlay, ' +
+                        '[data-astro-dev-toolbar]'
+                    );
+                    if (errorOverlays.length > 0) {
+                        issues.push('Error overlay detected on page');
+                    }
+
+                    // Check for visible error text in the DOM
+                    const body = document.body ? document.body.innerText : '';
+                    if (body.match(/Uncaught|ReferenceError|TypeError|SyntaxError|Error:/i)) {
+                        issues.push('Error text visible on page');
+                    }
+
+                    // Check for completely blank page (render failure)
+                    if (document.body && document.body.innerHTML.trim().length < 50) {
+                        issues.push('Page appears blank - possible render failure');
+                    }
+
+                    // Check if any existing error was captured by window.onerror
+                    if (window.__lastError) {
+                        issues.push('Runtime error: ' + window.__lastError);
+                    }
+
+                    // Check for hydration errors (common in SSR frameworks)
+                    if (body.match(/hydrat|mismatch/i)) {
+                        issues.push('Possible hydration error');
+                    }
+
+                    return issues;
                 " 2>&1) || true
 
-                # Check if we got actual console errors (not agent-browser tool errors)
+                # Check results (filter out agent-browser CLI errors)
                 if [[ -n "$console_check" ]] && [[ "$console_check" != "[]" ]] && [[ "$console_check" != "null" ]]; then
-                    # Filter out agent-browser CLI errors, keep actual JS errors
-                    if ! echo "$console_check" | grep -q "agent-browser"; then
-                        if echo "$console_check" | grep -qiE "error|exception|failed|overlay"; then
-                            ITERATION_ISSUES+=("Console/UI errors detected: $console_check")
+                    if ! echo "$console_check" | grep -qE "Unknown command|agent-browser"; then
+                        if [[ "$console_check" != "[]" ]]; then
+                            ITERATION_ISSUES+=("Runtime/UI errors detected: $console_check")
                             all_passed=false
-                            log_warn "Console/UI errors detected in browser"
+                            log_warn "Runtime/UI errors detected: $console_check"
                         fi
                     fi
                 fi
 
                 # Basic interaction test - check if page is responsive
                 local interaction_check
-                interaction_check=$(agent-browser execute "$dev_url" "
+                interaction_check=$(agent-browser eval "$dev_url" "
                     const issues = [];
 
                     // Check for buttons/links
@@ -739,6 +770,61 @@ run_iteration_checks() {
                             ITERATION_ISSUES+=("UI responsiveness issues: $ui_issues")
                             all_passed=false
                             log_warn "UI responsiveness issues detected"
+                        fi
+                    fi
+                fi
+
+                # ACTUAL INTERACTION TEST - try clicking a button and check for errors
+                # This catches frozen UIs and runtime errors that only manifest on interaction
+                local click_test
+                click_test=$(agent-browser eval "$dev_url" "
+                    return new Promise((resolve) => {
+                        // Set up error listener before interaction
+                        let errorsCaught = [];
+                        const origError = window.onerror;
+                        window.onerror = function(msg, src, line, col, err) {
+                            errorsCaught.push(msg);
+                            if (origError) origError.apply(this, arguments);
+                            return false;
+                        };
+
+                        // Find a button to click (prefer ones that look safe - not submit/delete)
+                        const buttons = Array.from(document.querySelectorAll('button:not([type=submit]), [role=button]'));
+                        const safeButton = buttons.find(b => {
+                            const text = (b.textContent || '').toLowerCase();
+                            return !text.includes('delete') && !text.includes('submit') && !text.includes('confirm');
+                        });
+
+                        if (safeButton) {
+                            try {
+                                // Try to click and see if it throws
+                                safeButton.click();
+                            } catch (e) {
+                                errorsCaught.push('Click threw: ' + e.message);
+                            }
+                        }
+
+                        // Wait a moment for any async errors
+                        setTimeout(() => {
+                            window.onerror = origError;
+                            resolve({
+                                tested: !!safeButton,
+                                buttonText: safeButton ? safeButton.textContent?.slice(0, 30) : null,
+                                errors: errorsCaught
+                            });
+                        }, 500);
+                    });
+                " 2>&1) || true
+
+                if [[ -n "$click_test" ]] && ! echo "$click_test" | grep -qE "Unknown command|agent-browser"; then
+                    log_info "Click test result: $click_test"
+                    if echo "$click_test" | grep -q '"errors":\s*\[' && ! echo "$click_test" | grep -q '"errors":\s*\[\]'; then
+                        local click_errors
+                        click_errors=$(echo "$click_test" | grep -o '"errors":\s*\[[^]]*\]' | head -1)
+                        if [[ -n "$click_errors" ]] && [[ "$click_errors" != *'[]'* ]]; then
+                            ITERATION_ISSUES+=("Runtime errors on interaction: $click_errors")
+                            all_passed=false
+                            log_warn "Runtime errors detected during interaction test"
                         fi
                     fi
                 fi
