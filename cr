@@ -517,8 +517,25 @@ check_config_changed() {
 }
 
 # Run lightweight per-iteration checks (tests + lint on changed files)
+# Extract quality gate commands from SPEC.md
+# Parses the "Quality Gates" section for backtick commands
+# Usage: get_spec_quality_commands "$spec_file"
+get_spec_quality_commands() {
+    local spec_file="$1"
+    [[ ! -f "$spec_file" ]] && return
+
+    # Extract commands from Quality Gates section
+    # Look for backtick commands like `bun astro check` or `bun run build`
+    awk '/^## Quality Gates/,/^## [^Q]/' "$spec_file" 2>/dev/null | \
+        grep -oE '`[^`]+`' | \
+        tr -d '`' | \
+        grep -E '^(bun|npm|yarn|pnpm|npx|bunx|node|python|ruby|bundle|rails|pytest|rspec|cargo|go) ' | \
+        sort -u
+}
+
 # Returns 0 if all pass, 1 if any fail
 # Sets ITERATION_ISSUES array with failures
+# SPEC-DRIVEN: Reads quality gates from SPEC.md and runs those commands
 run_iteration_checks() {
     ITERATION_ISSUES=()
     local all_passed=true
@@ -545,40 +562,189 @@ run_iteration_checks() {
         esac
     fi
 
-    # Run tests
-    local test_cmd
-    test_cmd=$(get_project_config "commands.test")
-    if [[ -n "$test_cmd" ]]; then
-        log_info "Running tests: $test_cmd"
-        if ! eval "CI=true $test_cmd" 2>&1 | tail -20; then
-            ITERATION_ISSUES+=("Tests failed")
-            all_passed=false
+    # Find the active SPEC.md
+    local spec_file=""
+    if [[ -n "${CURRENT_SPEC_DIR:-}" ]] && [[ -f "${CURRENT_SPEC_DIR}/SPEC.md" ]]; then
+        spec_file="${CURRENT_SPEC_DIR}/SPEC.md"
+    else
+        # Try to find it
+        spec_file=$(find specs -name "SPEC.md" -type f 2>/dev/null | head -1)
+    fi
+
+    # SPEC-DRIVEN CHECKS: Run commands from SPEC.md Quality Gates section
+    local spec_commands_run=0
+    if [[ -n "$spec_file" ]] && [[ -f "$spec_file" ]]; then
+        log_info "Reading quality gates from: $spec_file"
+
+        while IFS= read -r cmd; do
+            [[ -z "$cmd" ]] && continue
+
+            # Skip visual/manual checks
+            [[ "$cmd" == *"screenshot"* ]] && continue
+            [[ "$cmd" == *"agent-browser"* ]] && continue
+
+            log_info "Running quality gate: $cmd"
+            spec_commands_run=$((spec_commands_run + 1))
+
+            if ! eval "$cmd" 2>&1 | tail -20; then
+                ITERATION_ISSUES+=("Quality gate failed: $cmd")
+                all_passed=false
+            fi
+        done < <(get_spec_quality_commands "$spec_file")
+    fi
+
+    # FALLBACK: If no SPEC commands found, use generic detection
+    if [[ $spec_commands_run -eq 0 ]]; then
+        log_info "No SPEC quality gates found, using generic detection..."
+
+        # Run tests from project.json
+        local test_cmd
+        test_cmd=$(get_project_config "commands.test")
+        if [[ -n "$test_cmd" ]]; then
+            log_info "Running tests: $test_cmd"
+            if ! eval "CI=true $test_cmd" 2>&1 | tail -20; then
+                ITERATION_ISSUES+=("Tests failed")
+                all_passed=false
+            fi
+        fi
+
+        # Run lint if configured
+        local pkg_manager
+        pkg_manager=$(get_project_config "package_manager")
+        if [[ -f "package.json" ]] && grep -q '"lint"' package.json 2>/dev/null; then
+            local lint_cmd="$pkg_manager run lint"
+            log_info "Running lint: $lint_cmd"
+            if ! eval "$lint_cmd" 2>&1 | tail -10; then
+                ITERATION_ISSUES+=("Lint failed")
+                all_passed=false
+            fi
+        fi
+
+        # Run typecheck if configured
+        if [[ -f "package.json" ]] && grep -q '"typecheck"' package.json 2>/dev/null; then
+            local typecheck_cmd="$pkg_manager run typecheck"
+            log_info "Running typecheck: $typecheck_cmd"
+            if ! eval "$typecheck_cmd" 2>&1 | tail -10; then
+                ITERATION_ISSUES+=("Typecheck failed")
+                all_passed=false
+            fi
+        fi
+
+        # Run build if configured
+        local build_cmd
+        build_cmd=$(get_project_config "commands.build")
+        if [[ -n "$build_cmd" ]]; then
+            log_info "Running build: $build_cmd"
+            if ! eval "$build_cmd" 2>&1 | tail -20; then
+                ITERATION_ISSUES+=("Build failed")
+                all_passed=false
+            fi
         fi
     fi
 
-    # Run lint (only if there's a lint command in package.json)
-    local pkg_manager
-    pkg_manager=$(get_project_config "package_manager")
-    local lint_cmd=""
-    if [[ -f "package.json" ]] && grep -q '"lint"' package.json 2>/dev/null; then
-        lint_cmd="$pkg_manager run lint"
-    fi
+    # VISUAL/FUNCTIONAL VERIFICATION
+    # Run if we have UI changes and agent-browser is available
+    if command -v agent-browser &>/dev/null; then
+        local dev_url
+        dev_url=$(get_project_config "dev_url")
 
-    if [[ -n "$lint_cmd" ]]; then
-        log_info "Running lint: $lint_cmd"
-        if ! eval "$lint_cmd" 2>&1 | tail -10; then
-            ITERATION_ISSUES+=("Lint failed")
-            all_passed=false
-        fi
-    fi
+        if [[ -n "$dev_url" ]]; then
+            # Check if dev server is running
+            if curl -s --max-time 2 "$dev_url" > /dev/null 2>&1; then
+                log_info "Running visual verification at $dev_url"
 
-    # Run typecheck if available
-    if [[ -f "package.json" ]] && grep -q '"typecheck"' package.json 2>/dev/null; then
-        local typecheck_cmd="$pkg_manager run typecheck"
-        log_info "Running typecheck: $typecheck_cmd"
-        if ! eval "$typecheck_cmd" 2>&1 | tail -10; then
-            ITERATION_ISSUES+=("Typecheck failed")
-            all_passed=false
+                # Create screenshots directory
+                local screenshot_dir=".cr/screenshots"
+                mkdir -p "$screenshot_dir"
+                local timestamp
+                timestamp=$(date '+%Y%m%d-%H%M%S')
+
+                # Take screenshot and check for issues
+                local screenshot_file="$screenshot_dir/iteration-$timestamp.png"
+                local browser_output
+                browser_output=$(agent-browser screenshot "$dev_url" --output "$screenshot_file" 2>&1) || true
+
+                if [[ -f "$screenshot_file" ]]; then
+                    log_info "Screenshot saved: $screenshot_file"
+                fi
+
+                # Check for console errors using agent-browser
+                local console_check
+                console_check=$(agent-browser execute "$dev_url" "
+                    // Capture any errors that happened
+                    const errors = window.__CONSOLE_ERRORS__ || [];
+                    // Also check for React/framework error overlays
+                    const errorOverlay = document.querySelector('[data-nextjs-error], .error-overlay, #webpack-dev-server-client-overlay');
+                    if (errorOverlay) errors.push('Error overlay detected on page');
+                    // Check for frozen UI (event loop blocked)
+                    return errors;
+                " 2>&1) || true
+
+                # Check if we got actual console errors (not agent-browser tool errors)
+                if [[ -n "$console_check" ]] && [[ "$console_check" != "[]" ]] && [[ "$console_check" != "null" ]]; then
+                    # Filter out agent-browser CLI errors, keep actual JS errors
+                    if ! echo "$console_check" | grep -q "agent-browser"; then
+                        if echo "$console_check" | grep -qiE "error|exception|failed|overlay"; then
+                            ITERATION_ISSUES+=("Console/UI errors detected: $console_check")
+                            all_passed=false
+                            log_warn "Console/UI errors detected in browser"
+                        fi
+                    fi
+                fi
+
+                # Basic interaction test - check if page is responsive
+                local interaction_check
+                interaction_check=$(agent-browser execute "$dev_url" "
+                    const issues = [];
+
+                    // Check for buttons/links
+                    const buttons = document.querySelectorAll('button, [role=button], a[href]');
+                    const clickable = Array.from(buttons).filter(el => {
+                        const style = window.getComputedStyle(el);
+                        return style.pointerEvents !== 'none' && style.display !== 'none' && style.visibility !== 'hidden';
+                    });
+
+                    // Check if page seems frozen (no interactive elements or all disabled)
+                    if (clickable.length === 0 && buttons.length > 0) {
+                        issues.push('All buttons/links appear disabled or hidden');
+                    }
+
+                    // Check for infinite loading states
+                    const loaders = document.querySelectorAll('[class*=loading], [class*=spinner], [aria-busy=true]');
+                    if (loaders.length > 3) {
+                        issues.push('Multiple loading indicators present - possible stuck state');
+                    }
+
+                    // Check for empty main content (possible render failure)
+                    const main = document.querySelector('main, [role=main], #root, #app');
+                    if (main && main.children.length === 0) {
+                        issues.push('Main content area is empty - possible render failure');
+                    }
+
+                    return {
+                        total: buttons.length,
+                        clickable: clickable.length,
+                        issues: issues
+                    };
+                " 2>&1) || true
+
+                if [[ -n "$interaction_check" ]]; then
+                    log_info "Interactive elements check: $interaction_check"
+
+                    # Parse issues from the check
+                    if echo "$interaction_check" | grep -q '"issues":\s*\[' && ! echo "$interaction_check" | grep -q '"issues":\s*\[\]'; then
+                        local ui_issues
+                        ui_issues=$(echo "$interaction_check" | grep -o '"issues":\s*\[[^]]*\]' | head -1)
+                        if [[ -n "$ui_issues" ]] && [[ "$ui_issues" != *'[]'* ]]; then
+                            ITERATION_ISSUES+=("UI responsiveness issues: $ui_issues")
+                            all_passed=false
+                            log_warn "UI responsiveness issues detected"
+                        fi
+                    fi
+                fi
+            else
+                log_info "Dev server not running at $dev_url - skipping visual verification"
+            fi
         fi
     fi
 
@@ -606,27 +772,30 @@ add_learning() {
         echo '{"learnings":[]}' > "$learnings_file"
     fi
 
-    # Create new entry
-    local entry
-    entry=$(cat << EOF
-{
-  "date": "$(date -Iseconds)",
-  "spec": "$spec",
-  "iteration": $iteration,
-  "category": "$category",
-  "learning": "$learning",
-  "files": [$(echo "$files" | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/' | sed 's/""/null/g')]
-}
-EOF
-)
-
-    # Append to learnings array
+    # Use jq for safe JSON construction (jq --arg handles escaping automatically)
     if command -v jq &>/dev/null; then
-        jq ".learnings += [$entry]" "$learnings_file" > "$learnings_file.tmp" && mv "$learnings_file.tmp" "$learnings_file"
+        # Build entry safely with jq
+        local files_array="[]"
+        if [[ -n "$files" ]]; then
+            files_array=$(echo "$files" | tr ',' '\n' | jq -R . | jq -s .)
+        fi
+
+        jq --arg date "$(date -Iseconds)" \
+           --arg spec "$spec" \
+           --argjson iteration "$iteration" \
+           --arg category "$category" \
+           --arg learning "$learning" \
+           --argjson files "$files_array" \
+           '.learnings += [{date: $date, spec: $spec, iteration: $iteration, category: $category, learning: $learning, files: $files}]' \
+           "$learnings_file" > "$learnings_file.tmp" && mv "$learnings_file.tmp" "$learnings_file"
     else
-        # Fallback: simple append (less clean but works)
-        sed -i '' 's/\]}/,'"$(echo "$entry" | tr '\n' ' ')"']}/' "$learnings_file" 2>/dev/null || \
-        sed -i 's/\]}/,'"$(echo "$entry" | tr '\n' ' ')"']}/' "$learnings_file"
+        # Fallback: manual JSON construction with escaping (macOS compatible)
+        local escaped_learning escaped_spec
+        escaped_learning=$(printf '%s' "$learning" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+        escaped_spec=$(printf '%s' "$spec" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        local entry="{\"date\":\"$(date -Iseconds)\",\"spec\":\"$escaped_spec\",\"iteration\":$iteration,\"category\":\"$category\",\"learning\":\"$escaped_learning\",\"files\":[]}"
+        sed -i '' 's/\]}/,'"$entry"']}/' "$learnings_file" 2>/dev/null || \
+        sed -i 's/\]}/,'"$entry"']}/' "$learnings_file"
     fi
 }
 
@@ -676,48 +845,43 @@ EOF
     fi
 }
 
-# Add a learning to context.yaml
+# Add a learning to context.yaml (optional - data already in learnings.json)
 # Usage: add_context_learning "learning text"
 add_context_learning() {
     local learning="$1"
-    init_context
 
+    # Only write to context.yaml if yq is available
+    # Data is already stored in learnings.json via add_learning()
     if command -v yq &>/dev/null; then
-        yq -i ".learnings += [\"$learning\"]" "$CONTEXT_FILE"
-    else
-        # Fallback: append manually (less clean but works without yq)
-        sed -i '' 's/^learnings: \[\]/learnings:\n  - "'"$learning"'"/' "$CONTEXT_FILE" 2>/dev/null || \
-        echo "  - \"$learning\"" >> "$CONTEXT_FILE"
+        init_context
+        LEARNING="$learning" yq -i '.learnings += [env(LEARNING)]' "$CONTEXT_FILE" 2>/dev/null || true
     fi
 }
 
-# Add an error fix to context.yaml
+# Add an error fix to context.yaml (optional - data already in learnings.json)
 # Usage: add_context_error_fix "error pattern" "fix description"
 add_context_error_fix() {
     local error="$1"
     local fix="$2"
-    init_context
 
+    # Only write to context.yaml if yq is available
+    # Data is already stored in learnings.json via add_learning()
     if command -v yq &>/dev/null; then
-        yq -i ".errors_fixed += [{\"error\": \"$error\", \"fix\": \"$fix\"}]" "$CONTEXT_FILE"
-    else
-        # Fallback: append manually
-        echo "  - error: \"$error\"" >> "$CONTEXT_FILE"
-        echo "    fix: \"$fix\"" >> "$CONTEXT_FILE"
+        init_context
+        ERROR="$error" FIX="$fix" yq -i '.errors_fixed += [{"error": env(ERROR), "fix": env(FIX)}]' "$CONTEXT_FILE" 2>/dev/null || true
     fi
 }
 
-# Add a discovered pattern to context.yaml
+# Add a discovered pattern to context.yaml (optional - data already in learnings.json)
 # Usage: add_context_pattern "pattern description"
 add_context_pattern() {
     local pattern="$1"
-    init_context
 
+    # Only write to context.yaml if yq is available
+    # Data is already stored in learnings.json via add_learning()
     if command -v yq &>/dev/null; then
-        yq -i ".patterns_discovered += [\"$pattern\"]" "$CONTEXT_FILE"
-    else
-        # Fallback: append manually
-        echo "  - \"$pattern\"" >> "$CONTEXT_FILE"
+        init_context
+        PATTERN="$pattern" yq -i '.patterns_discovered += [env(PATTERN)]' "$CONTEXT_FILE" 2>/dev/null || true
     fi
 }
 
@@ -735,14 +899,23 @@ prune_context() {
 
 # Get context for injection into prompts
 # Returns formatted context string
+# Reads from learnings.json (using jq) with fallback to context.yaml (using yq)
 get_context_for_prompt() {
-    [[ ! -f "$CONTEXT_FILE" ]] && return
-
     local learnings=""
     local errors=""
     local patterns=""
+    local learnings_file=".cr/learnings.json"
 
-    if command -v yq &>/dev/null; then
+    # Prefer learnings.json (uses jq which is more common)
+    if [[ -f "$learnings_file" ]] && command -v jq &>/dev/null; then
+        # Get discovery/success learnings
+        learnings=$(jq -r '.learnings // [] | map(select(.category == "discovery" or .category == "success")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
+        # Get fix learnings
+        errors=$(jq -r '.learnings // [] | map(select(.category == "fix")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
+        # Get pattern learnings
+        patterns=$(jq -r '.learnings // [] | map(select(.category == "pattern")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
+    # Fallback to context.yaml if yq is available
+    elif [[ -f "$CONTEXT_FILE" ]] && command -v yq &>/dev/null; then
         learnings=$(yq -r '.learnings // [] | map("- " + .) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
         errors=$(yq -r '.errors_fixed // [] | map("- " + .error + " → Fix: " + .fix) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
         patterns=$(yq -r '.patterns_discovered // [] | map("- " + .) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
@@ -760,6 +933,281 @@ ${errors:-None yet}
 ### Patterns Discovered in This Codebase
 ${patterns:-None yet}
 EOF
+}
+
+#=============================================================================
+# CONTEXT PERSISTENCE ENHANCEMENT (Parse and persist learnings from output)
+#=============================================================================
+
+# Parse iteration output for learning markers
+# Extracts COMPLETED, FILES, TESTS, LEARNING, PATTERN, FIXED, BLOCKER markers
+# Usage: parse_iteration_output "$log_file" "$spec_name" "$iteration"
+parse_iteration_output() {
+    local log_file="$1"
+    local spec_name="${2:-unknown}"
+    local iteration="${3:-0}"
+
+    [[ ! -f "$log_file" ]] && return 0
+
+    # Helper to strip markdown bold markers and extract value
+    # Handles both "MARKER: value" and "**MARKER:** value"
+    extract_marker_value() {
+        local line="$1"
+        local marker="$2"
+        # Remove ** prefix/suffix if present, then extract value after marker
+        echo "$line" | sed -E "s/^\*{0,2}${marker}:\*{0,2} *//"
+    }
+
+    # Extract LEARNING markers (handles **LEARNING:** and LEARNING:)
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local learning
+        learning=$(extract_marker_value "$line" "LEARNING")
+        if [[ -n "$learning" ]]; then
+            add_learning "discovery" "$learning" "" "$spec_name" "$iteration"
+            add_context_learning "$learning"
+            log_info "Captured learning: $learning"
+        fi
+    done < <(grep -oE "(\*\*)?LEARNING:(\*\*)? .+" "$log_file" 2>/dev/null || true)
+
+    # Extract PATTERN markers
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local pattern
+        pattern=$(extract_marker_value "$line" "PATTERN")
+        if [[ -n "$pattern" ]]; then
+            add_context_pattern "$pattern"
+            add_learning "pattern" "Pattern: $pattern" "" "$spec_name" "$iteration"
+            log_info "Captured pattern: $pattern"
+        fi
+    done < <(grep -oE "(\*\*)?PATTERN:(\*\*)? .+" "$log_file" 2>/dev/null || true)
+
+    # Extract FIXED markers (format: FIXED: error → solution)
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local fixed
+        fixed=$(extract_marker_value "$line" "FIXED")
+        if [[ -n "$fixed" ]]; then
+            # Parse error and fix from "error → fix" format
+            if [[ "$fixed" == *"→"* ]]; then
+                local error_part="${fixed%% →*}"
+                local fix_part="${fixed#*→ }"
+                add_context_error_fix "$error_part" "$fix_part"
+                add_learning "fix" "Fixed: $fixed" "" "$spec_name" "$iteration"
+                log_info "Captured fix: $error_part → $fix_part"
+            fi
+        fi
+    done < <(grep -oE "(\*\*)?FIXED:(\*\*)? .+" "$log_file" 2>/dev/null || true)
+
+    # Extract COMPLETED markers for success tracking
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local completed
+        completed=$(extract_marker_value "$line" "COMPLETED")
+        if [[ -n "$completed" ]]; then
+            add_learning "success" "Completed: $completed" "" "$spec_name" "$iteration"
+            log_info "Captured completion: $completed"
+        fi
+    done < <(grep -oE "(\*\*)?COMPLETED:(\*\*)? .+" "$log_file" 2>/dev/null || true)
+
+    # Extract BLOCKER markers
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local blocker
+        blocker=$(extract_marker_value "$line" "BLOCKER")
+        if [[ -n "$blocker" ]]; then
+            add_learning "blocker" "Blocker: $blocker" "" "$spec_name" "$iteration"
+            log_warn "Captured blocker: $blocker"
+        fi
+    done < <(grep -oE "(\*\*)?BLOCKER:(\*\*)? .+" "$log_file" 2>/dev/null || true)
+
+    return 0
+}
+
+# Get the previous iteration's log file
+# Usage: get_previous_iteration_log "$history_dir" "$current_iteration"
+get_previous_iteration_log() {
+    local history_dir="$1"
+    local current_iteration="$2"
+
+    [[ ! -d "$history_dir" ]] && return 1
+    [[ "$current_iteration" -le 1 ]] && return 1
+
+    local prev_iteration=$((current_iteration - 1))
+    local prev_prefix=$(printf '%03d' $prev_iteration)
+
+    # Find log file matching the prefix
+    local prev_log
+    prev_log=$(find "$history_dir" -name "${prev_prefix}-*.md" -type f 2>/dev/null | head -1)
+
+    if [[ -n "$prev_log" ]] && [[ -f "$prev_log" ]]; then
+        echo "$prev_log"
+        return 0
+    fi
+
+    return 1
+}
+
+# Generate a summary of the previous iteration
+# Usage: generate_iteration_summary "$log_file"
+generate_iteration_summary() {
+    local log_file="$1"
+
+    [[ ! -f "$log_file" ]] && return 0
+
+    local summary=""
+
+    # Extract key information from the log (handles **MARKER:** and MARKER: formats)
+    local completed
+    completed=$(grep -oE "(\*\*)?COMPLETED:(\*\*)? .+" "$log_file" 2>/dev/null | head -1 | sed -E 's/^\*{0,2}COMPLETED:\*{0,2} *//' || echo "")
+
+    local files
+    files=$(grep -oE "(\*\*)?FILES:(\*\*)? .+" "$log_file" 2>/dev/null | head -1 | sed -E 's/^\*{0,2}FILES:\*{0,2} *//' || echo "")
+
+    local learning
+    learning=$(grep -oE "(\*\*)?LEARNING:(\*\*)? .+" "$log_file" 2>/dev/null | head -1 | sed -E 's/^\*{0,2}LEARNING:\*{0,2} *//' || echo "")
+
+    local fixed
+    fixed=$(grep -oE "(\*\*)?FIXED:(\*\*)? .+" "$log_file" 2>/dev/null | head -1 | sed -E 's/^\*{0,2}FIXED:\*{0,2} *//' || echo "")
+
+    local blocker
+    blocker=$(grep -oE "(\*\*)?BLOCKER:(\*\*)? .+" "$log_file" 2>/dev/null | head -1 | sed -E 's/^\*{0,2}BLOCKER:\*{0,2} *//' || echo "")
+
+    # Check iteration outcome
+    local outcome="unknown"
+    if grep -q "All checks passed" "$log_file" 2>/dev/null; then
+        outcome="success"
+    elif grep -q "Failed:" "$log_file" 2>/dev/null; then
+        outcome="had_issues"
+    fi
+
+    # Build summary
+    if [[ -n "$completed" ]] || [[ -n "$files" ]] || [[ -n "$learning" ]] || [[ -n "$fixed" ]] || [[ -n "$blocker" ]]; then
+        summary="PREVIOUS ITERATION SUMMARY:
+"
+        [[ -n "$completed" ]] && summary+="- COMPLETED: $completed
+"
+        [[ -n "$files" ]] && summary+="- FILES: $files
+"
+        [[ -n "$learning" ]] && summary+="- LEARNING: $learning
+"
+        [[ -n "$fixed" ]] && summary+="- FIXED: $fixed
+"
+        [[ -n "$blocker" ]] && summary+="- BLOCKER: $blocker
+"
+        [[ "$outcome" == "had_issues" ]] && summary+="- Outcome: Had issues that need fixing
+"
+        [[ "$outcome" == "success" ]] && summary+="- Outcome: Checks passed
+"
+    fi
+
+    echo "$summary"
+}
+
+# Find similar error fixes from context.yaml
+# Usage: find_similar_error_fixes "$error_message"
+find_similar_error_fixes() {
+    local error="$1"
+
+    [[ ! -f "$CONTEXT_FILE" ]] && return 0
+    [[ -z "$error" ]] && return 0
+
+    # Extract key terms from error (first 5 significant words)
+    local key_terms
+    key_terms=$(echo "$error" | tr -cs '[:alnum:]' '\n' | grep -v '^$' | head -5 | tr '\n' '|' | sed 's/|$//')
+
+    [[ -z "$key_terms" ]] && return 0
+
+    local matches=""
+    if command -v yq &>/dev/null; then
+        # Search errors_fixed for matches
+        matches=$(yq -r ".errors_fixed // [] | .[] | select(.error | test(\"(?i)($key_terms)\")) | \"- \" + .error + \" → Fix: \" + .fix" "$CONTEXT_FILE" 2>/dev/null || echo "")
+    fi
+
+    if [[ -n "$matches" ]]; then
+        echo "YOU'VE FIXED SIMILAR ERRORS BEFORE:
+$matches"
+    fi
+}
+
+# Find similar fixes in learnings.json
+# Usage: find_similar_fixes_in_learnings "$error_message"
+find_similar_fixes_in_learnings() {
+    local error="$1"
+    local learnings_file=".cr/learnings.json"
+
+    [[ ! -f "$learnings_file" ]] && return 0
+    [[ -z "$error" ]] && return 0
+
+    # Extract key terms from error
+    local key_terms
+    key_terms=$(echo "$error" | tr -cs '[:alnum:]' '\n' | grep -v '^$' | head -5 | tr '\n' '|' | sed 's/|$//')
+
+    [[ -z "$key_terms" ]] && return 0
+
+    local matches=""
+    if command -v jq &>/dev/null; then
+        matches=$(jq -r ".learnings | map(select(.category == \"fix\" and (.learning | test(\"(?i)($key_terms)\")))) | .[-5:] | .[] | \"- \" + .learning" "$learnings_file" 2>/dev/null || echo "")
+    fi
+
+    if [[ -n "$matches" ]]; then
+        echo "$matches"
+    fi
+}
+
+# Refresh PROMPT.md with updated context
+# Call this at the start of each iteration to inject fresh accumulated context
+# Usage: refresh_prompt_context "$spec_dir"
+refresh_prompt_context() {
+    local spec_dir="$1"
+    local prompt_file="$spec_dir/PROMPT.md"
+
+    [[ ! -f "$prompt_file" ]] && return 0
+
+    # Check if the file has context markers
+    if ! grep -q "<!-- CONTEXT_START -->" "$prompt_file" 2>/dev/null; then
+        return 0  # No markers, nothing to refresh
+    fi
+
+    # Get fresh accumulated context
+    local accumulated_ctx
+    accumulated_ctx=$(get_context_for_prompt 2>/dev/null || echo "No accumulated context yet.")
+
+    # Create backup
+    cp "$prompt_file" "$prompt_file.bak"
+
+    # Write context to temp file (awk -v breaks with multi-line strings)
+    local ctx_temp
+    ctx_temp=$(mktemp)
+    printf '%s\n' "$accumulated_ctx" > "$ctx_temp"
+
+    # Use awk to replace content between markers
+    awk -v ctxfile="$ctx_temp" '
+        BEGIN {
+            while ((getline line < ctxfile) > 0) {
+                ctx = ctx (ctx ? "\n" : "") line
+            }
+            close(ctxfile)
+        }
+        /<!-- CONTEXT_START -->/ {
+            print
+            print ctx
+            skip = 1
+            next
+        }
+        /<!-- CONTEXT_END -->/ {
+            skip = 0
+            print
+            next
+        }
+        !skip {
+            print
+        }
+    ' "$prompt_file.bak" > "$prompt_file"
+
+    rm -f "$ctx_temp"
+    log_info "Refreshed context in PROMPT.md"
+    return 0
 }
 
 #=============================================================================
@@ -812,11 +1260,7 @@ add_error_to_prompt() {
         error="${error:0:2000}... [truncated]"
     fi
 
-    # Escape special characters for safe insertion
-    local escaped_error
-    escaped_error=$(printf '%s' "$error" | sed 's/[&/\]/\\&/g' | sed ':a;N;$!ba;s/\n/\\n/g')
-
-    # Append error context to prompt
+    # Append error context to prompt (heredoc handles the content safely)
     cat >> "$prompt_file" << EOF
 
 ---
@@ -901,8 +1345,12 @@ discover_quality_commands() {
                     quality_commands+=("bun run lint")
                 [[ -n "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && \
                     quality_commands+=("bun run typecheck")
+                # Astro projects: use 'astro check' for type checking
+                if ls astro.config.* &>/dev/null; then
+                    quality_commands+=("bun astro check")
+                    quality_commands+=("bun run build")
                 # Fallback to tsc if no typecheck script but tsconfig exists
-                if [[ -z "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && [[ -f "tsconfig.json" ]]; then
+                elif [[ -z "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && [[ -f "tsconfig.json" ]]; then
                     quality_commands+=("bunx tsc --noEmit")
                 fi
             fi
@@ -1105,17 +1553,41 @@ verify_integration() {
         fi
     fi
 
-    # 4. Run tests using discovered command
-    local test_cmd
-    test_cmd=$(get_project_config "commands.test")
-    if [[ -n "$test_cmd" ]]; then
-        log_info "Running tests: $test_cmd"
-        if ! eval "CI=true $test_cmd" 2>/dev/null; then
-            INTEGRATION_FAILURES+=("Tests failed: $test_cmd")
-            all_passed=false
+    # 4. Run tests - SPEC-DRIVEN: use SPEC.md quality gates if available
+    local tests_run=0
+
+    # Try SPEC-driven test commands first
+    if [[ -n "${CURRENT_SPEC_DIR:-}" ]] && [[ -f "${CURRENT_SPEC_DIR}/SPEC.md" ]]; then
+        local spec_file="${CURRENT_SPEC_DIR}/SPEC.md"
+        while IFS= read -r cmd; do
+            [[ -z "$cmd" ]] && continue
+            # Skip non-test commands (build, screenshot, etc.)
+            [[ "$cmd" == *"build"* ]] && continue
+            [[ "$cmd" == *"screenshot"* ]] && continue
+            [[ "$cmd" == *"agent-browser"* ]] && continue
+
+            log_info "Running SPEC test: $cmd"
+            tests_run=$((tests_run + 1))
+            if ! eval "CI=true $cmd" 2>&1 | tail -20; then
+                INTEGRATION_FAILURES+=("Tests failed: $cmd")
+                all_passed=false
+            fi
+        done < <(get_spec_quality_commands "$spec_file")
+    fi
+
+    # Fallback to project.json test command if no SPEC tests
+    if [[ $tests_run -eq 0 ]]; then
+        local test_cmd
+        test_cmd=$(get_project_config "commands.test")
+        if [[ -n "$test_cmd" ]]; then
+            log_info "Running tests: $test_cmd"
+            if ! eval "CI=true $test_cmd" 2>/dev/null; then
+                INTEGRATION_FAILURES+=("Tests failed: $test_cmd")
+                all_passed=false
+            fi
+        else
+            log_warn "No test command discovered"
         fi
-    else
-        log_warn "No test command discovered"
     fi
 
     # 5. Run e2e tests if discovered
@@ -1947,6 +2419,39 @@ EOF
     if [[ -f "$CR_DIR/templates/PROMPT-template.md" ]]; then
         cp "$CR_DIR/templates/PROMPT-template.md" "$spec_dir/PROMPT.md"
         log_success "Created $spec_dir/PROMPT.md (from template)"
+
+        # Substitute {{ACCUMULATED_CONTEXT}} placeholder with actual context
+        if [[ -f "$spec_dir/PROMPT.md" ]]; then
+            local accumulated_ctx
+            accumulated_ctx=$(get_context_for_prompt 2>/dev/null || echo "No accumulated context yet.")
+
+            # Check if there's actual content to inject
+            if [[ -n "$accumulated_ctx" ]]; then
+                # Write context to temp file for safe multi-line substitution
+                local ctx_temp
+                ctx_temp=$(mktemp)
+                printf '%s' "$accumulated_ctx" > "$ctx_temp"
+
+                # Use Perl for reliable multi-line substitution (handles special chars)
+                if command -v perl &>/dev/null; then
+                    perl -i -pe "
+                        BEGIN { local \$/; open(F, '<', '$ctx_temp'); \$ctx = <F>; close(F); }
+                        s/\{\{ACCUMULATED_CONTEXT\}\}/\$ctx/g;
+                    " "$spec_dir/PROMPT.md"
+                else
+                    # Fallback: use awk with file read
+                    awk -v ctxfile="$ctx_temp" '
+                        BEGIN { while ((getline line < ctxfile) > 0) ctx = ctx (ctx ? "\n" : "") line }
+                        /\{\{ACCUMULATED_CONTEXT\}\}/ { gsub(/\{\{ACCUMULATED_CONTEXT\}\}/, ctx) }
+                        { print }
+                    ' "$spec_dir/PROMPT.md" > "$spec_dir/PROMPT.md.tmp" && \
+                    mv "$spec_dir/PROMPT.md.tmp" "$spec_dir/PROMPT.md"
+                fi
+
+                rm -f "$ctx_temp"
+                log_info "Injected accumulated context into PROMPT.md"
+            fi
+        fi
     else
         # Fallback: create inline with enforced backpressure
         cat > "$spec_dir/PROMPT.md" << 'PROMPT'
@@ -2182,6 +2687,9 @@ cmd_implement() {
     local abs_spec_dir
     abs_spec_dir=$(cd "$spec_dir" && pwd)
 
+    # Export for use by run_iteration_checks
+    CURRENT_SPEC_DIR="$abs_spec_dir"
+
     while [[ $iteration -lt $MAX_ITERATIONS ]]; do
         iteration=$((iteration + 1))
         local timestamp
@@ -2235,10 +2743,23 @@ cmd_implement() {
         # Build iteration context
         local issues_context=""
         if [[ -n "${PENDING_ISSUES:-}" ]]; then
+            # Look for similar errors we've fixed before
+            local similar_fixes=""
+            similar_fixes=$(find_similar_error_fixes "${PENDING_ISSUES}" 2>/dev/null || true)
+            if [[ -z "$similar_fixes" ]]; then
+                similar_fixes=$(find_similar_fixes_in_learnings "${PENDING_ISSUES}" 2>/dev/null || true)
+            fi
+
             issues_context="
 ISSUES FROM PREVIOUS ITERATION (fix these first!):
 - ${PENDING_ISSUES}
-
+"
+            if [[ -n "$similar_fixes" ]]; then
+                issues_context+="
+$similar_fixes
+"
+            fi
+            issues_context+="
 Before continuing with tasks, address these issues."
         fi
 
@@ -2265,15 +2786,29 @@ $accumulated_context"
             fi
         fi
 
+        # Refresh PROMPT.md with latest accumulated context
+        refresh_prompt_context "$abs_spec_dir"
+
+        # Generate summary from previous iteration (if any)
+        local prev_iteration_summary=""
+        if [[ $iteration -gt 1 ]]; then
+            local prev_log
+            prev_log=$(get_previous_iteration_log "$history_dir" "$iteration" 2>/dev/null || true)
+            if [[ -n "$prev_log" ]] && [[ -f "$prev_log" ]]; then
+                prev_iteration_summary=$(generate_iteration_summary "$prev_log" 2>/dev/null || true)
+            fi
+        fi
+
         # Create the iteration prompt
         local iteration_prompt="You are in iteration $iteration of a Compound Ralph implementation loop.
-
+$prev_iteration_summary
 CRITICAL INSTRUCTIONS:
 1. Read $abs_spec_dir/SPEC.md - this is your single source of truth
 2. Read $abs_spec_dir/PROMPT.md - this contains your detailed instructions
 3. Follow the phases in PROMPT.md exactly
 4. Complete ONE task, run quality checks, update SPEC.md
 5. If ALL exit criteria are met, output <loop-complete>Feature complete</loop-complete>
+6. Output LEARNING/PATTERN/FIXED markers to help future iterations learn
 $issues_context$learnings_context$accumulated_context
 
 Start by reading both files now."
@@ -2356,6 +2891,9 @@ Start by reading both files now."
                 echo "All checks passed (tests, lint, typecheck)"
             } >> "$log_file"
         fi
+
+        # Parse iteration output for learnings (COMPLETED, LEARNING, PATTERN, FIXED markers)
+        parse_iteration_output "$log_file" "$(basename "$spec_dir")" "$iteration"
 
         # Check for completion signal in log (support both old and new format)
         # Match the FULL tag with closing to avoid false positives like "Not outputting `<loop-complete>`"

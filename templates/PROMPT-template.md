@@ -11,7 +11,9 @@ Your state persists through these files (all in repo):
 **This loop handles EVERYTHING:** empty repos, existing projects, any tech stack.
 You discover what exists, create what's missing, and verify it actually works.
 
+<!-- CONTEXT_START -->
 {{ACCUMULATED_CONTEXT}}
+<!-- CONTEXT_END -->
 
 ---
 
@@ -590,6 +592,34 @@ The next iteration will continue automatically. Do not output the completion sig
 2. Create appropriate config (package.json, docker-compose, etc.)
 3. Install/start
 4. Verify working
+
+---
+
+## Output Markers (REQUIRED)
+
+When you complete work, output these markers so learnings persist across iterations:
+
+```
+COMPLETED: <brief task description>
+FILES: <files created or modified, comma-separated>
+TESTS: <test files created, if any>
+LEARNING: <key insight you learned>
+PATTERN: <reusable pattern discovered>
+FIXED: <error message> → <how you fixed it>
+BLOCKER: <what's blocking> | NEEDS: <what's needed to unblock>
+```
+
+**Examples:**
+```
+COMPLETED: Add user authentication endpoint
+FILES: src/auth/login.ts, src/auth/middleware.ts
+TESTS: tests/auth/login.test.ts
+LEARNING: JWT tokens need explicit expiry or they default to 15min
+PATTERN: All auth routes should use the verifyToken middleware
+FIXED: "Cannot read property 'id' of undefined" → Added null check before accessing user.id
+```
+
+Output these markers at the END of your work, before the completion signal if applicable. They help future iterations learn from your work.
 
 ---
 
