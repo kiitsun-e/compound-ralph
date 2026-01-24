@@ -2898,6 +2898,29 @@ Start by reading both files now."
         # Match the FULL tag with closing to avoid false positives like "Not outputting `<loop-complete>`"
         if grep -qE "<loop-complete>.*</loop-complete>|<promise>COMPLETE</promise>" "$log_file"; then
             echo ""
+
+            # If per-iteration checks failed, don't accept completion
+            if [[ ${#ITERATION_ISSUES[@]} -gt 0 ]]; then
+                log_warn "Claude signaled completion but per-iteration checks failed:"
+                for issue in "${ITERATION_ISSUES[@]}"; do
+                    log_warn "  - $issue"
+                done
+                log_info "Continuing loop to address issues..."
+
+                # Add issues to SPEC for next iteration
+                {
+                    echo ""
+                    echo "### Per-Iteration Check Failures (Auto-added)"
+                    echo "Claude signaled completion but these checks failed:"
+                    for issue in "${ITERATION_ISSUES[@]}"; do
+                        echo "- [ ] Fix: $issue"
+                    done
+                } >> "$spec_file"
+
+                sleep "$ITERATION_DELAY"
+                continue
+            fi
+
             log_info "Claude signals completion. Verifying integration..."
 
             # Detect project type for verification
