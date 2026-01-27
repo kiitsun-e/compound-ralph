@@ -1270,7 +1270,7 @@ find_spec_needing_fixes() {
         fi
 
         # Check if todos exist
-        if [[ -d "$todos_dir" ]] && [[ -n "$(ls -A "$todos_dir"/*.md 2>/dev/null)" ]]; then
+        if [[ -d "$todos_dir" ]] && [[ -n "$(find "$todos_dir" -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
             # Check if fix spec doesn't exist yet
             local fix_dir="$spec_dir/fixes"
             if [[ -n "$review_type" ]]; then
@@ -1586,17 +1586,21 @@ cmd_converse() {
     # Generate decision filename
     local topic_slug
     topic_slug=$(echo "$topic" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-' | cut -c1-50)
+    # Fallback if slug is empty (e.g. non-ASCII topic)
+    if [[ -z "$topic_slug" ]]; then
+        topic_slug="untitled-$(date '+%s' | tail -c 7)"
+    fi
     local decision_file="knowledge/decisions/$(date '+%Y-%m-%d')-${topic_slug}.md"
 
     # Gather existing context
     local existing_decisions=""
-    if [[ -d "knowledge/decisions" ]] && [[ -n "$(ls -A knowledge/decisions/*.md 2>/dev/null)" ]]; then
-        existing_decisions="$(printf '\n## Existing Decision Records\nReview these for relevant context:\n')$(ls -1 knowledge/decisions/*.md 2>/dev/null | while read -r f; do echo "- $f: $(head -1 "$f" | sed 's/^# //')"; done)"
+    if [[ -d "knowledge/decisions" ]] && [[ -n "$(find knowledge/decisions -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        existing_decisions="$(printf '\n## Existing Decision Records\nReview these for relevant context:\n')$(find knowledge/decisions -maxdepth 1 -name '*.md' 2>/dev/null | while read -r f; do echo "- $f: $(head -1 "$f" | sed 's/^# //')"; done)"
     fi
 
     local existing_research=""
-    if [[ -d "knowledge/research" ]] && [[ -n "$(ls -A knowledge/research/*.md 2>/dev/null)" ]]; then
-        existing_research="$(printf '\n## Existing Research\nThese reports may be relevant:\n')$(ls -1 knowledge/research/*.md 2>/dev/null | while read -r f; do echo "- $f: $(head -1 "$f" | sed 's/^# //')"; done)"
+    if [[ -d "knowledge/research" ]] && [[ -n "$(find knowledge/research -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        existing_research="$(printf '\n## Existing Research\nThese reports may be relevant:\n')$(find knowledge/research -maxdepth 1 -name '*.md' 2>/dev/null | while read -r f; do echo "- $f: $(head -1 "$f" | sed 's/^# //')"; done)"
     fi
 
     local vision_context=""
@@ -1750,17 +1754,21 @@ cmd_research() {
     # Generate report filename
     local topic_slug
     topic_slug=$(echo "$topic" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-' | cut -c1-50)
-    local report_file="knowledge/research/${topic_slug}.md"
+    # Fallback if slug is empty (e.g. non-ASCII topic)
+    if [[ -z "$topic_slug" ]]; then
+        topic_slug="untitled-$(date '+%s' | tail -c 7)"
+    fi
+    local report_file="knowledge/research/$(date '+%Y-%m-%d')-${topic_slug}.md"
 
     # Gather existing context
     local existing_decisions=""
-    if [[ -d "knowledge/decisions" ]] && [[ -n "$(ls -A knowledge/decisions/*.md 2>/dev/null)" ]]; then
-        existing_decisions="$(printf '\n## Relevant Decision Records\nThese decisions may inform your research:\n')$(for f in knowledge/decisions/*.md; do echo "- $f"; done)"
+    if [[ -d "knowledge/decisions" ]] && [[ -n "$(find knowledge/decisions -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        existing_decisions="$(printf '\n## Relevant Decision Records\nThese decisions may inform your research:\n')$(find knowledge/decisions -maxdepth 1 -name '*.md' 2>/dev/null | while read -r f; do echo "- $f"; done)"
     fi
 
     local existing_research=""
-    if [[ -d "knowledge/research" ]] && [[ -n "$(ls -A knowledge/research/*.md 2>/dev/null)" ]]; then
-        existing_research="$(printf '\n## Existing Research Reports\nBuild on or reference these:\n')$(for f in knowledge/research/*.md; do echo "- $f: $(head -1 "$f" | sed 's/^# //')"; done)"
+    if [[ -d "knowledge/research" ]] && [[ -n "$(find knowledge/research -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        existing_research="$(printf '\n## Existing Research Reports\nBuild on or reference these:\n')$(find knowledge/research -maxdepth 1 -name '*.md' 2>/dev/null | while read -r f; do echo "- $f: $(head -1 "$f" | sed 's/^# //')"; done)"
     fi
 
     local vision_context=""
@@ -1953,35 +1961,39 @@ cmd_plan() {
     # Generate plan filename
     local plan_name
     plan_name=$(echo "$description" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-' | cut -c1-50)
+    # Fallback if slug is empty (e.g. non-ASCII description)
+    if [[ -z "$plan_name" ]]; then
+        plan_name="untitled-$(date '+%s' | tail -c 7)"
+    fi
     local plan_file="$PLANS_DIR/${plan_name}.md"
 
     # Gather knowledge context from converse/research phases
     local knowledge_context=""
     local knowledge_files_found=false
 
-    if [[ -d "knowledge/decisions" ]] && [[ -n "$(ls -A knowledge/decisions/*.md 2>/dev/null)" ]]; then
+    if [[ -d "knowledge/decisions" ]] && [[ -n "$(find knowledge/decisions -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
         knowledge_context+="
 
 IMPORTANT: Decision records from prior conversations exist in knowledge/decisions/.
 Read ALL of these before planning - they contain assumptions, trade-offs, and
 decisions that MUST inform your plan:"
-        for f in knowledge/decisions/*.md; do
+        while IFS= read -r f; do
             knowledge_context+="
   - $f"
-        done
+        done < <(find knowledge/decisions -maxdepth 1 -name '*.md' 2>/dev/null)
         knowledge_files_found=true
     fi
 
-    if [[ -d "knowledge/research" ]] && [[ -n "$(ls -A knowledge/research/*.md 2>/dev/null)" ]]; then
+    if [[ -d "knowledge/research" ]] && [[ -n "$(find knowledge/research -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
         knowledge_context+="
 
 IMPORTANT: Research reports from prior investigation exist in knowledge/research/.
 Read ALL of these before planning - they contain feasibility assessments, risks,
 and recommendations that MUST inform your plan:"
-        for f in knowledge/research/*.md; do
+        while IFS= read -r f; do
             knowledge_context+="
   - $f"
-        done
+        done < <(find knowledge/research -maxdepth 1 -name '*.md' 2>/dev/null)
         knowledge_files_found=true
     fi
 
