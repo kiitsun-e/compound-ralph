@@ -4,14 +4,16 @@ Autonomous Feature Implementation System combining compound-engineering's rich p
 
 ## Philosophy
 
-**Planning is human-guided and rich. Implementation is autonomous and focused.**
+**Understand first. Plan with context. Build autonomously.**
 
 Each unit of engineering work should make subsequent units easier. Compound Ralph achieves this by:
 
-1. **Rich Planning Phase** - Human + AI collaboration to create deeply researched specs
-2. **Autonomous Building Phase** - Loop executes one task per iteration with fresh context
-3. **Continuous Backpressure** - Tests, lint, types run every iteration for self-correction
-4. **Compounding Learnings** - Notes and patterns accumulate across iterations
+1. **Exploration Phase** - Socratic dialogue to surface assumptions and explore trade-offs
+2. **Research Phase** - Deep investigation of feasibility, best practices, and risks
+3. **Rich Planning Phase** - Human + AI collaboration informed by knowledge from prior phases
+4. **Autonomous Building Phase** - Loop executes one task per iteration with fresh context
+5. **Continuous Backpressure** - Tests, lint, types run every iteration for self-correction
+6. **Compounding Learnings** - Notes and patterns accumulate across iterations
 
 ## Installation
 
@@ -74,26 +76,38 @@ ln -s ~/Desktop/coding-projects/compound-ralph/cr /usr/local/bin/cr
 cd your-project
 cr init
 
-# 2. Create a rich, researched plan (INTERACTIVE)
+# 2. (Optional) Explore the idea before committing
+cr converse "user authentication approach"
+# Socratic dialogue surfaces assumptions and trade-offs
+# Saves decision record to knowledge/decisions/
+
+# 3. (Optional) Research before planning
+cr research "JWT vs session-based auth"
+# Deep investigation of feasibility, best practices, risks
+# Saves research report to knowledge/research/
+
+# 4. Create a rich, researched plan (INTERACTIVE)
 cr plan "add user authentication with JWT"
+# Automatically reads knowledge/ from steps 2-3
 # Claude will ask clarifying questions - answer them!
 # When satisfied, run /deepen-plan then exit
 
-# 3. Convert plan to SPEC format
+# 5. Convert plan to SPEC format
 cr spec plans/add-user-authentication-with-jwt.md
 
-# 4. Edit SPEC.md to refine tasks and context
+# 6. Edit SPEC.md to refine tasks and context
 # (This is your chance to guide the implementation)
 
-# 5. Start autonomous implementation (AUTONOMOUS)
+# 7. Start autonomous implementation (AUTONOMOUS)
 cr implement
 # Walk away - Claude works through tasks one by one
 ```
 
-## Two Modes
+## Three Modes
 
 | Phase | Mode | Your Role |
 |-------|------|-----------|
+| **Exploration** | Interactive | Converse about ideas, review research reports |
 | **Planning** | Interactive | Answer questions, refine scope, run /deepen-plan |
 | **Implementation** | Autonomous | Walk away, check back later |
 
@@ -103,7 +117,7 @@ cr implement
 
 Initialize a project for Compound Ralph.
 
-- Creates `specs/` and `plans/` directories
+- Creates `specs/`, `plans/`, and `knowledge/` directories
 - Generates `AGENTS.md` with auto-detected build/test commands
 - Supports: bun, npm, yarn, pnpm, rails, python, go, rust
 
@@ -112,10 +126,42 @@ cr init                    # Current directory
 cr init ~/projects/myapp   # Specific path
 ```
 
+### `cr converse <topic>`
+
+Start an exploratory conversation about an idea before committing to a plan.
+
+- Activates a Socratic dialogue persona
+- Guides through: Understand → Assumptions → Alternatives → Trade-offs → Decide
+- Asks hard questions: "Are we solving the right problem?" / "What's the cost of being wrong?"
+- Saves decision records to `knowledge/decisions/YYYY-MM-DD-<topic>.md`
+- Decision records are automatically fed into `cr plan`
+
+```bash
+cr converse "user authentication approach"
+cr converse "how should we handle caching"
+```
+
+### `cr research <topic>`
+
+Deep investigation before planning — understand before you build.
+
+- Analyzes codebase for existing patterns and dependencies
+- Researches external best practices and common pitfalls
+- Assesses technical feasibility, complexity, and risks
+- States confidence levels (High/Medium/Low/Unknown)
+- Saves research reports to `knowledge/research/<topic>.md`
+- Research reports are automatically fed into `cr plan`
+
+```bash
+cr research "oauth implementation best practices"
+cr research "caching strategies for our API"
+```
+
 ### `cr plan <description>`
 
 Create and enrich a feature plan using compound-engineering workflows.
 
+- **Automatically reads** `knowledge/decisions/` and `knowledge/research/` to incorporate prior converse/research findings
 - Runs `/workflows:plan` to create structured plan
 - Runs `/deepen-plan` to enrich with 40+ parallel research agents
 - Outputs to `plans/<feature-name>.md`
@@ -170,8 +216,13 @@ cr status
 ```
 your-project/
 ├── AGENTS.md                 # Build/test/lint commands (shared)
+├── knowledge/                # Pre-planning knowledge base
+│   ├── decisions/            # Decision records from cr converse
+│   │   └── 2026-01-27-auth-approach.md
+│   └── research/             # Research reports from cr research
+│       └── oauth-providers.md
 ├── plans/
-│   └── feature-name.md       # Rich plans from /workflows:plan
+│   └── feature-name.md       # Rich plans from cr plan (informed by knowledge/)
 └── specs/
     └── feature-name/
         ├── SPEC.md           # State file (single source of truth)
@@ -420,6 +471,7 @@ This tool implements the Ralph Loop technique natively in bash, inspired by:
 - [The Ralph Wiggum Playbook](https://paddo.dev/blog/ralph-wiggum-playbook/)
 - [frankbria's Enhanced Implementation](https://github.com/frankbria/ralph-claude-code)
 - [Don't Waste Your Backpressure](https://banay.me/dont-waste-your-backpressure/)
+- [ominous](https://github.com/nia-vf/ominous) - Pre-implementation research and Socratic dialogue workflows (converse/research commands)
 
 Note: This project does **not** use the [official ralph-wiggum plugin](https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum) - it implements its own loop by calling `claude --dangerously-skip-permissions --print` directly.
 
