@@ -7,7 +7,9 @@
 #
 # Usage:
 #   cr init [project-path]           Initialize a project for Compound Ralph
-#   cr plan <feature-description>    Create and deepen a plan
+#   cr converse <topic>              Explore ideas via Socratic dialogue
+#   cr research <topic>              Deep investigation before planning
+#   cr plan <feature-description>    Create and deepen a plan (uses knowledge/)
 #   cr spec <plan-file>              Convert plan to SPEC.md format
 #   cr implement [spec-dir]          Start autonomous implementation loop
 #   cr status                        Show progress of all specs
@@ -42,7 +44,7 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-CR_VERSION="2.0.0"
+CR_VERSION="2.1.0"
 CR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPECS_DIR="specs"
 PLANS_DIR="plans"
@@ -1956,7 +1958,7 @@ find_spec_needing_fixes() {
         fi
 
         # Check if todos exist
-        if [[ -d "$todos_dir" ]] && [[ -n "$(ls -A "$todos_dir"/*.md 2>/dev/null)" ]]; then
+        if [[ -d "$todos_dir" ]] && [[ -n "$(find "$todos_dir" -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
             # Check if fix spec doesn't exist yet
             local fix_dir="$spec_dir/fixes"
             if [[ -n "$review_type" ]]; then
@@ -2203,7 +2205,9 @@ cmd_init() {
     # Create directories
     mkdir -p "$project_path/$SPECS_DIR"
     mkdir -p "$project_path/$PLANS_DIR"
-    log_success "Created specs/ and plans/ directories"
+    mkdir -p "$project_path/knowledge/decisions"
+    mkdir -p "$project_path/knowledge/research"
+    log_success "Created specs/, plans/, and knowledge/ directories"
 
     # Generate AGENTS.md if it doesn't exist
     if [[ ! -f "$project_path/AGENTS.md" ]]; then
@@ -2240,9 +2244,388 @@ cmd_init() {
     echo ""
     echo "Next steps:"
     echo "  1. Review and customize AGENTS.md with your project's commands"
-    echo "  2. Create a plan:    cr plan \"your feature description\""
-    echo "  3. Convert to spec:  cr spec plans/your-feature.md"
-    echo "  4. Implement:        cr implement specs/your-feature/"
+    echo "  2. (Optional) Explore ideas: cr converse \"your topic\""
+    echo "  3. (Optional) Research:      cr research \"your topic\""
+    echo "  4. Create a plan:            cr plan \"your feature description\""
+    echo "  5. Convert to spec:          cr spec plans/your-feature.md"
+    echo "  6. Implement:                cr implement specs/your-feature/"
+    echo ""
+}
+
+
+#=============================================================================
+# CONVERSE COMMAND (Pre-planning: Socratic dialogue)
+#=============================================================================
+
+cmd_converse() {
+    local topic="$*"
+
+    if [[ -z "$topic" ]]; then
+        log_error "Usage: cr converse <topic>"
+        log_error "Example: cr converse \"user authentication approach\""
+        exit 1
+    fi
+
+    log_step "Starting Conversation: $topic"
+
+    # Ensure knowledge directories exist
+    mkdir -p "knowledge/decisions"
+
+    # Generate decision filename
+    local topic_slug
+    topic_slug=$(echo "$topic" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-' | cut -c1-50)
+    # Fallback if slug is empty (e.g. non-ASCII topic)
+    if [[ -z "$topic_slug" ]]; then
+        topic_slug="untitled-$(date '+%s' | tail -c 7)"
+    fi
+    local decision_file="knowledge/decisions/$(date '+%Y-%m-%d')-${topic_slug}.md"
+
+    # Gather existing context
+    local existing_decisions=""
+    if [[ -d "knowledge/decisions" ]] && [[ -n "$(find knowledge/decisions -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        existing_decisions="$(printf '\n## Existing Decision Records\nReview these for relevant context:\n')$(find knowledge/decisions -maxdepth 1 -name '*.md' 2>/dev/null | while read -r f; do echo "- $f: $(head -1 "$f" | sed 's/^# //')"; done)"
+    fi
+
+    local existing_research=""
+    if [[ -d "knowledge/research" ]] && [[ -n "$(find knowledge/research -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        existing_research="$(printf '\n## Existing Research\nThese reports may be relevant:\n')$(find knowledge/research -maxdepth 1 -name '*.md' 2>/dev/null | while read -r f; do echo "- $f: $(head -1 "$f" | sed 's/^# //')"; done)"
+    fi
+
+    local vision_context=""
+    if [[ -f "specs/VISION.md" ]]; then
+        vision_context=$'\nRead specs/VISION.md for product context.'
+    fi
+
+    local claude_md_context=""
+    if [[ -f "CLAUDE.md" ]]; then
+        claude_md_context=$'\nRead CLAUDE.md for project conventions.'
+    fi
+
+    echo ""
+    echo -e "${CYAN}Starting exploratory conversation about: $topic${NC}"
+    echo ""
+    echo "This is a Socratic dialogue to surface assumptions and explore trade-offs"
+    echo "BEFORE committing to any plan or implementation."
+    echo ""
+    echo "The conversation will:"
+    echo "  1. Understand the core problem"
+    echo "  2. Surface and examine assumptions"
+    echo "  3. Explore 2-3 alternative approaches"
+    echo "  4. Discuss trade-offs of each"
+    echo "  5. Reach a decision (or identify what research is needed)"
+    echo ""
+    echo -e "Decision record will be saved to: ${BOLD}$decision_file${NC}"
+    echo ""
+    echo -e "${YELLOW}Starting Claude...${NC}"
+    echo ""
+
+    local converse_prompt
+    read -r -d '' converse_prompt << CONVERSE_EOF || true
+You are a Conversationalist - a curious, thoughtful conversation partner.
+
+TOPIC: $topic
+
+YOUR ROLE:
+You facilitate exploratory dialogue before planning. You surface assumptions,
+explore alternatives, and help reach well-reasoned decisions.
+
+Be curious, not prescriptive. Ask probing questions. Challenge assumptions
+gently but persistently. Explore alternatives before converging. Summarize
+trade-offs clearly.
+
+HARD QUESTIONS TO ASK:
+- "Are we solving the right problem, or just the obvious one?"
+- "What will users actually do vs what we assume they'll do?"
+- "If this fails, will we understand why we made this choice?"
+- "What are we NOT seeing because of our assumptions?"
+- "What's the cost of being wrong here?"
+- "Who else is affected that we haven't considered?"
+- "What would have to be true for this to be the wrong approach?"
+
+CONVERSATION STAGES:
+1. UNDERSTAND - What's the core problem? Who experiences it?
+2. ASSUMPTIONS - What are we assuming? What if we're wrong?
+3. ALTERNATIVES - What are 2-3 other approaches?
+4. TRADE-OFFS - What are we trading off with each approach?
+5. DECIDE - Do we have enough info? What's our decision?
+
+CONTEXT TO READ:${vision_context}${claude_md_context}${existing_decisions}${existing_research}
+
+WHEN THE CONVERSATION CONCLUDES:
+Save a decision record to: $decision_file
+
+The decision record MUST follow this format:
+
+# Decision: [Title]
+
+## Date
+$(date '+%Y-%m-%d')
+
+## Context
+[What prompted this discussion]
+
+## Assumptions
+[Key assumptions listed explicitly]
+
+## Alternatives Considered
+### Option A: [Name]
+- Pros: ...
+- Cons: ...
+
+### Option B: [Name]
+- Pros: ...
+- Cons: ...
+
+## Decision
+[What we chose and why]
+
+## Consequences
+[What this means for the project]
+
+## Open Questions
+- [ ] [What still needs investigation]
+
+NEXT STEPS to suggest:
+- If more information needed: recommend 'cr research <specific-topic>'
+- If ready to build: recommend 'cr plan <feature-description>'
+- If assumptions need validation: recommend a quick experiment
+
+Start the conversation now. Ask your first probing question about: $topic
+CONVERSE_EOF
+
+    # Run Claude interactively
+    claude --dangerously-skip-permissions "$converse_prompt"
+
+    echo ""
+    log_success "Conversation complete!"
+    echo ""
+
+    # Check if decision record was created
+    if [[ -f "$decision_file" ]]; then
+        log_success "Decision record saved to: $decision_file"
+    else
+        local latest_decision
+        latest_decision=$(ls -t knowledge/decisions/*.md 2>/dev/null | head -1)
+        if [[ -n "$latest_decision" ]]; then
+            log_success "Decision record saved to: $latest_decision"
+        else
+            log_warn "No decision record was created. You can create one manually."
+        fi
+    fi
+
+    echo ""
+    echo "Next steps:"
+    echo "  1. Review the decision: cat $decision_file"
+    echo "  2. If more info needed: cr research \"<specific-topic>\""
+    echo "  3. If ready to build:   cr plan \"<feature-description>\""
+    echo ""
+}
+
+#=============================================================================
+# RESEARCH COMMAND (Pre-planning: Deep investigation)
+#=============================================================================
+
+cmd_research() {
+    local topic="$*"
+
+    if [[ -z "$topic" ]]; then
+        log_error "Usage: cr research <topic>"
+        log_error "Example: cr research \"oauth implementation best practices\""
+        exit 1
+    fi
+
+    log_step "Starting Research: $topic"
+
+    # Ensure knowledge directories exist
+    mkdir -p "knowledge/research"
+
+    # Generate report filename
+    local topic_slug
+    topic_slug=$(echo "$topic" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-' | cut -c1-50)
+    # Fallback if slug is empty (e.g. non-ASCII topic)
+    if [[ -z "$topic_slug" ]]; then
+        topic_slug="untitled-$(date '+%s' | tail -c 7)"
+    fi
+    local report_file="knowledge/research/$(date '+%Y-%m-%d')-${topic_slug}.md"
+
+    # Gather existing context
+    local existing_decisions=""
+    if [[ -d "knowledge/decisions" ]] && [[ -n "$(find knowledge/decisions -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        existing_decisions="$(printf '\n## Relevant Decision Records\nThese decisions may inform your research:\n')$(find knowledge/decisions -maxdepth 1 -name '*.md' 2>/dev/null | while read -r f; do echo "- $f"; done)"
+    fi
+
+    local existing_research=""
+    if [[ -d "knowledge/research" ]] && [[ -n "$(find knowledge/research -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        existing_research="$(printf '\n## Existing Research Reports\nBuild on or reference these:\n')$(find knowledge/research -maxdepth 1 -name '*.md' 2>/dev/null | while read -r f; do echo "- $f: $(head -1 "$f" | sed 's/^# //')"; done)"
+    fi
+
+    local vision_context=""
+    if [[ -f "specs/VISION.md" ]]; then
+        vision_context=$'\nRead specs/VISION.md for product direction and priorities.'
+    fi
+
+    local claude_md_context=""
+    if [[ -f "CLAUDE.md" ]]; then
+        claude_md_context=$'\nRead CLAUDE.md for project conventions and existing patterns.'
+    fi
+
+    echo ""
+    echo -e "${CYAN}Starting deep research on: $topic${NC}"
+    echo ""
+    echo "This is a thorough investigation to understand before building."
+    echo ""
+    echo "The research will cover:"
+    echo "  1. Codebase analysis - existing patterns and dependencies"
+    echo "  2. External research - best practices and common pitfalls"
+    echo "  3. Feasibility assessment - complexity, risks, prerequisites"
+    echo ""
+    echo -e "Research report will be saved to: ${BOLD}$report_file${NC}"
+    echo ""
+    echo -e "${YELLOW}Starting Claude...${NC}"
+    echo ""
+
+    local research_prompt
+    read -r -d '' research_prompt << RESEARCH_EOF || true
+You are a Researcher - a thorough, evidence-based investigator.
+
+TOPIC: $topic
+
+YOUR ROLE:
+You investigate deeply before recommending. You look for what has been tried
+before, what experts know, and what could go wrong. You distinguish between
+facts and opinions. You note confidence levels. You highlight unknowns
+explicitly rather than glossing over them.
+
+HARD QUESTIONS TO INVESTIGATE:
+- "What has already been tried and failed in this space?"
+- "What are we building on top of, and how stable is that foundation?"
+- "What do experts know that we don't?"
+- "What's the thing that will bite us in 6 months?"
+- "What are the hidden dependencies?"
+- "What's the maintenance burden of each option?"
+- "What security implications haven't been considered?"
+
+RESEARCH METHODOLOGY:
+
+### Phase 1: Codebase Analysis
+- Find existing patterns related to the topic
+- Identify dependencies and their health (version, maintenance, vulnerabilities)
+- Map affected areas and components
+- Note technical constraints and conventions
+- Look for similar problems already solved in the codebase
+
+### Phase 2: External Research
+- Search for best practices and common approaches
+- Look for common pitfalls and anti-patterns
+- Find similar implementations to learn from
+- Check for security advisories and concerns
+- Review official documentation
+
+### Phase 3: Feasibility Assessment
+- Estimate technical complexity (simple/moderate/complex)
+- Check dependency compatibility
+- Identify prerequisites needed
+- List risks and unknowns
+- Estimate scope of changes
+
+CONFIDENCE LEVELS (always state these):
+- High: Multiple sources confirm, evidence is strong
+- Medium: Some evidence, but not fully verified
+- Low: Based on limited information or inference
+- Unknown: Need more investigation
+
+CONTEXT TO READ:${vision_context}${claude_md_context}${existing_decisions}${existing_research}
+
+OUTPUT:
+Save your research report to: $report_file
+
+Use this format:
+
+# Research: $topic
+
+## Summary
+[2-3 sentence overview of key findings and recommendation]
+
+## Confidence Level
+[Overall confidence: High/Medium/Low]
+
+## Codebase Analysis
+
+### Existing Patterns
+[What related code already exists?]
+
+### Dependencies
+| Dependency | Version | Status | Notes |
+|------------|---------|--------|-------|
+
+### Affected Areas
+[What parts of the codebase would be impacted?]
+
+## External Research
+
+### Best Practices
+[What do experts recommend?]
+
+### Common Pitfalls
+[What typically goes wrong?]
+
+### Similar Implementations
+[Links to reference implementations]
+
+## Risks & Concerns
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+
+## Recommendations
+
+**Recommended approach:** [Your recommendation]
+
+**Rationale:** [Why this approach?]
+
+**Alternatives considered:**
+1. [Alternative 1] - [Why not chosen]
+2. [Alternative 2] - [Why not chosen]
+
+## Open Questions
+- [ ] [Question that still needs answering]
+
+## Sources
+- [Source with link] - [Brief description]
+
+NEXT STEPS to suggest:
+- If ready to build: recommend 'cr plan <feature-description>'
+- If need to revisit assumptions: recommend 'cr converse <topic>'
+- If more research needed: specify what questions remain
+
+Begin your investigation now.
+RESEARCH_EOF
+
+    # Run Claude interactively
+    claude --dangerously-skip-permissions "$research_prompt"
+
+    echo ""
+    log_success "Research complete!"
+    echo ""
+
+    # Check if report was created
+    if [[ -f "$report_file" ]]; then
+        log_success "Research report saved to: $report_file"
+    else
+        local latest_report
+        latest_report=$(ls -t knowledge/research/*.md 2>/dev/null | head -1)
+        if [[ -n "$latest_report" ]]; then
+            log_success "Research report saved to: $latest_report"
+        else
+            log_warn "No research report was created. You can create one manually."
+        fi
+    fi
+
+    echo ""
+    echo "Next steps:"
+    echo "  1. Review the report: cat $report_file"
+    echo "  2. If ready to build: cr plan \"<feature-description>\""
+    echo "  3. If need to discuss: cr converse \"<topic>\""
     echo ""
 }
 
@@ -2266,13 +2649,55 @@ cmd_plan() {
     # Generate plan filename
     local plan_name
     plan_name=$(echo "$description" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-' | cut -c1-50)
+    # Fallback if slug is empty (e.g. non-ASCII description)
+    if [[ -z "$plan_name" ]]; then
+        plan_name="untitled-$(date '+%s' | tail -c 7)"
+    fi
     local plan_file="$PLANS_DIR/${plan_name}.md"
+
+    # Gather knowledge context from converse/research phases
+    local knowledge_context=""
+    local knowledge_files_found=false
+
+    if [[ -d "knowledge/decisions" ]] && [[ -n "$(find knowledge/decisions -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        knowledge_context+="
+
+IMPORTANT: Decision records from prior conversations exist in knowledge/decisions/.
+Read ALL of these before planning - they contain assumptions, trade-offs, and
+decisions that MUST inform your plan:"
+        while IFS= read -r f; do
+            knowledge_context+="
+  - $f"
+        done < <(find knowledge/decisions -maxdepth 1 -name '*.md' 2>/dev/null)
+        knowledge_files_found=true
+    fi
+
+    if [[ -d "knowledge/research" ]] && [[ -n "$(find knowledge/research -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        knowledge_context+="
+
+IMPORTANT: Research reports from prior investigation exist in knowledge/research/.
+Read ALL of these before planning - they contain feasibility assessments, risks,
+and recommendations that MUST inform your plan:"
+        while IFS= read -r f; do
+            knowledge_context+="
+  - $f"
+        done < <(find knowledge/research -maxdepth 1 -name '*.md' 2>/dev/null)
+        knowledge_files_found=true
+    fi
+
+    if [[ "$knowledge_files_found" == "true" ]]; then
+        log_info "Found knowledge context from prior converse/research sessions"
+    fi
 
     echo ""
     echo -e "${CYAN}Starting interactive planning session...${NC}"
     echo ""
     echo "You'll work with Claude to create and refine your plan."
     echo "Claude will ask clarifying questions - answer them to shape the plan."
+    if [[ "$knowledge_files_found" == "true" ]]; then
+        echo ""
+        echo -e "${GREEN}Knowledge context detected - decisions and research will be fed into planning.${NC}"
+    fi
     echo ""
     echo "When planning is complete:"
     echo "  1. Type /deepen-plan to enrich with research (recommended)"
@@ -2281,9 +2706,20 @@ cmd_plan() {
     echo -e "${YELLOW}Starting Claude...${NC}"
     echo ""
 
-    # Run Claude for planning with auto-permissions
-    # The user can answer questions, refine the plan, and run /deepen-plan
-    claude --dangerously-skip-permissions "/workflows:plan $description"
+    # If knowledge context exists, prime Claude with it before planning
+    if [[ -n "$knowledge_context" ]]; then
+        claude --dangerously-skip-permissions "Before starting the plan, read all knowledge files for context:
+${knowledge_context}
+
+After reading those files, proceed with:
+/workflows:plan $description
+
+The plan MUST incorporate findings from the knowledge files. Reference specific
+decisions, risks, and recommendations from the research/conversation phases."
+    else
+        # Run Claude for planning with auto-permissions (original behavior)
+        claude --dangerously-skip-permissions "/workflows:plan $description"
+    fi
 
     echo ""
     log_success "Planning session complete!"
@@ -2295,6 +2731,7 @@ cmd_plan() {
     echo "  2. Convert to spec: cr spec plans/<plan-file>.md"
     echo ""
 }
+
 
 #=============================================================================
 # SPEC COMMAND
@@ -4925,10 +5362,22 @@ USAGE:
 
 COMMANDS:
     init [path]         Initialize a project for Compound Ralph
-                        Creates specs/, plans/, AGENTS.md
+                        Creates specs/, plans/, knowledge/, AGENTS.md
                         Auto-detects project type (bun, npm, rails, python, etc.)
 
+    converse <topic>    Explore an idea through Socratic dialogue
+        (alias: conv)   Surfaces assumptions, explores alternatives, clarifies
+                        trade-offs BEFORE planning. Saves decision records to
+                        knowledge/decisions/ for use in later planning.
+
+    research <topic>    Deep investigation before planning
+        (alias: res)    Analyzes codebase, researches best practices, assesses
+                        feasibility. Saves research reports to knowledge/research/
+                        for use in later planning.
+
     plan <description>  Create and deepen a feature plan
+                        Automatically ingests knowledge/ context from prior
+                        converse/research sessions into the planning prompt.
                         Runs /workflows:plan + /deepen-plan
                         Enriches with 40+ parallel research agents
 
@@ -4980,34 +5429,45 @@ COMMANDS:
 
     help                Show this help
 
-SPEC STRUCTURE (after review):
-    specs/my-feature/
-    ├── SPEC.md                 # Original feature spec
-    ├── PROMPT.md
-    ├── todos/
-    │   ├── code/               # Code review findings
-    │   │   └── 001-p1-issue.md
-    │   └── design/             # Design review findings
-    │       └── 001-p2-issue.md
-    └── fixes/
-        ├── code/               # Fix spec for code issues
-        │   └── SPEC.md
-        └── design/             # Fix spec for design issues
-            └── SPEC.md
+PROJECT STRUCTURE:
+    your-project/
+    ├── knowledge/                  # Pre-planning knowledge (from converse/research)
+    │   ├── decisions/              # Decision records from cr converse
+    │   │   └── 2026-01-27-auth-approach.md
+    │   └── research/               # Research reports from cr research
+    │       └── oauth-providers.md
+    ├── plans/                      # Rich plans from cr plan
+    │   └── add-user-auth.md
+    └── specs/                      # Implementation specs
+        └── my-feature/
+            ├── SPEC.md             # Feature spec (source of truth)
+            ├── PROMPT.md
+            ├── todos/
+            │   ├── code/           # Code review findings
+            │   │   └── 001-p1-issue.md
+            │   └── design/         # Design review findings
+            │       └── 001-p2-issue.md
+            └── fixes/
+                ├── code/           # Fix spec for code issues
+                │   └── SPEC.md
+                └── design/         # Fix spec for design issues
+                    └── SPEC.md
 
 WORKFLOW:
     1. cr init                           # Initialize project
-    2. cr plan "add user auth"           # Create rich plan
-    3. cr spec plans/add-user-auth.md    # Convert to spec
-    4. cr implement                      # Build feature
-    5. cr design                         # Polish UI (optional)
-    6. cr review                         # Code review → todos/code/
-    7. cr review --design                # Design review → todos/design/
-    8. cr fix code                       # Create fix spec for code
-    9. cr implement                      # Fix code issues
-   10. cr fix design                     # Create fix spec for design
-   11. cr implement                      # Fix design issues
-   12. cr review                         # Verify clean
+    2. cr converse "auth approach"       # Explore ideas (optional)
+    3. cr research "oauth providers"     # Investigate deeply (optional)
+    4. cr plan "add user auth"           # Create plan (uses knowledge/)
+    5. cr spec plans/add-user-auth.md    # Convert to spec
+    6. cr implement                      # Build feature
+    7. cr design                         # Polish UI (optional)
+    8. cr review                         # Code review → todos/code/
+    9. cr review --design                # Design review → todos/design/
+   10. cr fix code                       # Create fix spec for code
+   11. cr implement                      # Fix code issues
+   12. cr fix design                     # Create fix spec for design
+   13. cr implement                      # Fix design issues
+   14. cr review                         # Verify clean
 
 ENVIRONMENT VARIABLES:
     MAX_ITERATIONS      Maximum loop iterations (default: 50)
@@ -5025,6 +5485,8 @@ RESILIENCE:
     - Auto-resume: just run 'cr implement' again
 
 PHILOSOPHY:
+    Understand first, then plan, then build.
+    Converse and research BEFORE committing to a plan.
     Planning is human-guided and rich.
     Implementation is autonomous and focused.
     Each iteration: fresh context + file-based state.
@@ -5053,6 +5515,12 @@ main() {
     case "$command" in
         init)
             cmd_init "$@"
+            ;;
+        converse|conv)
+            cmd_converse "$@"
+            ;;
+        research|res)
+            cmd_research "$@"
             ;;
         plan)
             cmd_plan "$@"
