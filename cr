@@ -517,8 +517,114 @@ check_config_changed() {
 }
 
 # Run lightweight per-iteration checks (tests + lint on changed files)
+# Extract quality gate commands from SPEC.md
+# Parses the "Quality Gates" section for backtick commands
+# Skips lines marked with [INFORMATIONAL] - those are logged but non-blocking
+# Usage: get_spec_quality_commands "$spec_file"
+get_spec_quality_commands() {
+    local spec_file="$1"
+    [[ ! -f "$spec_file" ]] && return
+
+    # Extract commands from Quality Gates section
+    # Skip lines containing [INFORMATIONAL] - those are non-blocking
+    # Look for backtick commands like `bun astro check` or `bun run build`
+    awk '/^## Quality Gates/,/^## [^Q]/' "$spec_file" 2>/dev/null | \
+        grep -v '\[INFORMATIONAL\]' | \
+        grep -oE '`[^`]+`' | \
+        tr -d '`' | \
+        grep -E '^(bun|npm|yarn|pnpm|npx|bunx|node|python|ruby|bundle|rails|pytest|rspec|cargo|go) ' | \
+        sort -u
+}
+
+# Extract INFORMATIONAL quality gate commands (logged but non-blocking)
+# Usage: get_spec_informational_commands "$spec_file"
+get_spec_informational_commands() {
+    local spec_file="$1"
+    [[ ! -f "$spec_file" ]] && return
+
+    # Extract commands from lines marked [INFORMATIONAL]
+    awk '/^## Quality Gates/,/^## [^Q]/' "$spec_file" 2>/dev/null | \
+        grep '\[INFORMATIONAL\]' | \
+        grep -oE '`[^`]+`' | \
+        tr -d '`' | \
+        grep -E '^(bun|npm|yarn|pnpm|npx|bunx|node|python|ruby|bundle|rails|pytest|rspec|cargo|go) ' | \
+        sort -u
+}
+
+# Track repeated failures across iterations
+# File: .cr/failure_tracking.json
+# Format: {"gate_name": {"count": N, "last_error_hash": "..."}}
+FAILURE_TRACKING_FILE=".cr/failure_tracking.json"
+
+init_failure_tracking() {
+    mkdir -p .cr
+    if [[ ! -f "$FAILURE_TRACKING_FILE" ]]; then
+        echo '{}' > "$FAILURE_TRACKING_FILE"
+    fi
+}
+
+# Record a failure and return how many times this gate has failed consecutively
+# Usage: record_gate_failure "gate_command" "error_output"
+# Returns: failure count for this gate
+record_gate_failure() {
+    local gate="$1"
+    local error_output="$2"
+    init_failure_tracking
+
+    # Create a hash of the error to detect if it's the same error
+    local error_hash
+    error_hash=$(echo "$error_output" | head -5 | md5sum | cut -d' ' -f1 2>/dev/null || echo "unknown")
+
+    # Safe key for JSON (replace special chars)
+    local safe_gate
+    safe_gate=$(echo "$gate" | tr -c '[:alnum:]' '_')
+
+    if command -v jq &>/dev/null; then
+        local current_count current_hash
+        current_count=$(jq -r ".\"$safe_gate\".count // 0" "$FAILURE_TRACKING_FILE" 2>/dev/null || echo "0")
+        current_hash=$(jq -r ".\"$safe_gate\".last_error_hash // \"\"" "$FAILURE_TRACKING_FILE" 2>/dev/null || echo "")
+
+        # If same error, increment count; if different error, reset to 1
+        local new_count
+        if [[ "$current_hash" == "$error_hash" ]]; then
+            new_count=$((current_count + 1))
+        else
+            new_count=1
+        fi
+
+        # Update tracking
+        jq --arg gate "$safe_gate" --argjson count "$new_count" --arg hash "$error_hash" \
+           '.[$gate] = {"count": $count, "last_error_hash": $hash}' \
+           "$FAILURE_TRACKING_FILE" > "$FAILURE_TRACKING_FILE.tmp" && \
+           mv "$FAILURE_TRACKING_FILE.tmp" "$FAILURE_TRACKING_FILE"
+
+        echo "$new_count"
+    else
+        echo "1"
+    fi
+}
+
+# Clear failure tracking for a gate (call when it passes)
+# Usage: clear_gate_failure "gate_command"
+clear_gate_failure() {
+    local gate="$1"
+    init_failure_tracking
+
+    local safe_gate
+    safe_gate=$(echo "$gate" | tr -c '[:alnum:]' '_')
+
+    if command -v jq &>/dev/null; then
+        jq "del(.\"$safe_gate\")" "$FAILURE_TRACKING_FILE" > "$FAILURE_TRACKING_FILE.tmp" && \
+           mv "$FAILURE_TRACKING_FILE.tmp" "$FAILURE_TRACKING_FILE"
+    fi
+}
+
+# Maximum times a gate can fail with the same error before we warn about it
+MAX_REPEATED_FAILURES=5
+
 # Returns 0 if all pass, 1 if any fail
 # Sets ITERATION_ISSUES array with failures
+# SPEC-DRIVEN: Reads quality gates from SPEC.md and runs those commands
 run_iteration_checks() {
     ITERATION_ISSUES=()
     local all_passed=true
@@ -545,40 +651,277 @@ run_iteration_checks() {
         esac
     fi
 
-    # Run tests
-    local test_cmd
-    test_cmd=$(get_project_config "commands.test")
-    if [[ -n "$test_cmd" ]]; then
-        log_info "Running tests: $test_cmd"
-        if ! eval "CI=true $test_cmd" 2>&1 | tail -20; then
-            ITERATION_ISSUES+=("Tests failed")
-            all_passed=false
+    # Find the active SPEC.md
+    local spec_file=""
+    if [[ -n "${CURRENT_SPEC_DIR:-}" ]] && [[ -f "${CURRENT_SPEC_DIR}/SPEC.md" ]]; then
+        spec_file="${CURRENT_SPEC_DIR}/SPEC.md"
+    else
+        # Try to find it
+        spec_file=$(find specs -name "SPEC.md" -type f 2>/dev/null | head -1)
+    fi
+
+    # SPEC-DRIVEN CHECKS: Run commands from SPEC.md Quality Gates section
+    local spec_commands_run=0
+    if [[ -n "$spec_file" ]] && [[ -f "$spec_file" ]]; then
+        log_info "Reading quality gates from: $spec_file"
+
+        # Run blocking quality gates
+        while IFS= read -r cmd; do
+            [[ -z "$cmd" ]] && continue
+
+            # Skip visual/manual checks
+            [[ "$cmd" == *"screenshot"* ]] && continue
+            [[ "$cmd" == *"agent-browser"* ]] && continue
+
+            log_info "Running quality gate: $cmd"
+            spec_commands_run=$((spec_commands_run + 1))
+
+            # Capture output for failure tracking
+            local gate_output
+            gate_output=$(eval "$cmd" 2>&1 | tail -50)
+            local gate_exit_code=${PIPESTATUS[0]}
+
+            echo "$gate_output" | tail -20
+
+            if [[ $gate_exit_code -ne 0 ]]; then
+                # Track how many times this gate has failed with same error
+                local failure_count
+                failure_count=$(record_gate_failure "$cmd" "$gate_output")
+
+                ITERATION_ISSUES+=("Quality gate failed: $cmd")
+                all_passed=false
+
+                # Save the actual error output so it can be injected into next iteration
+                # This is CRITICAL - the agent needs to SEE the errors to fix them
+                mkdir -p .cr
+                {
+                    echo "=== FAILED GATE: $cmd ==="
+                    echo "$gate_output"
+                    echo ""
+                } >> .cr/gate_failures.txt
+
+                # Warn if this gate keeps failing with the same error
+                if [[ "$failure_count" -ge "$MAX_REPEATED_FAILURES" ]]; then
+                    log_warn "Gate '$cmd' has failed $failure_count times with same error!"
+                    log_warn "The agent MUST fix this error, not ignore it."
+                    log_warn "If truly unfixable, mark as [INFORMATIONAL] in SPEC.md"
+                fi
+            else
+                # Gate passed - clear failure tracking
+                clear_gate_failure "$cmd"
+            fi
+        done < <(get_spec_quality_commands "$spec_file")
+
+        # Run informational gates (logged but non-blocking)
+        while IFS= read -r cmd; do
+            [[ -z "$cmd" ]] && continue
+            [[ "$cmd" == *"screenshot"* ]] && continue
+            [[ "$cmd" == *"agent-browser"* ]] && continue
+
+            log_info "Running informational gate: $cmd"
+            if ! eval "$cmd" 2>&1 | tail -10; then
+                log_warn "Informational gate failed (non-blocking): $cmd"
+            fi
+        done < <(get_spec_informational_commands "$spec_file")
+    fi
+
+    # FALLBACK: If no SPEC commands found, warn and use minimal project.json detection
+    if [[ $spec_commands_run -eq 0 ]]; then
+        log_warn "No quality gates found in SPEC.md!"
+        log_warn "The implementing agent should discover and add quality gates."
+        log_warn "Attempting minimal fallback using project.json scripts..."
+
+        # Only run what we can discover from project.json - no framework-specific hardcoding
+        local pkg_manager
+        pkg_manager=$(get_project_config "package_manager")
+
+        # Try test command from project.json
+        local test_cmd
+        test_cmd=$(get_project_config "commands.test")
+        if [[ -n "$test_cmd" ]]; then
+            log_info "Running discovered test command: $test_cmd"
+            if ! eval "CI=true $test_cmd" 2>&1 | tail -20; then
+                ITERATION_ISSUES+=("Tests failed")
+                all_passed=false
+            fi
         fi
-    fi
 
-    # Run lint (only if there's a lint command in package.json)
-    local pkg_manager
-    pkg_manager=$(get_project_config "package_manager")
-    local lint_cmd=""
-    if [[ -f "package.json" ]] && grep -q '"lint"' package.json 2>/dev/null; then
-        lint_cmd="$pkg_manager run lint"
-    fi
-
-    if [[ -n "$lint_cmd" ]]; then
-        log_info "Running lint: $lint_cmd"
-        if ! eval "$lint_cmd" 2>&1 | tail -10; then
-            ITERATION_ISSUES+=("Lint failed")
-            all_passed=false
+        # Try lint only if explicitly in package.json scripts (not framework-specific)
+        if [[ -f "package.json" ]] && [[ -n "$pkg_manager" ]]; then
+            if grep -q '"lint"' package.json 2>/dev/null; then
+                local lint_cmd="$pkg_manager run lint"
+                log_info "Running discovered lint command: $lint_cmd"
+                if ! eval "$lint_cmd" 2>&1 | tail -10; then
+                    ITERATION_ISSUES+=("Lint failed")
+                    all_passed=false
+                fi
+            fi
         fi
+
+        # Note: We intentionally don't run typecheck/build here unless they're in SPEC
+        # The agent should discover and add appropriate quality gates to SPEC.md
     fi
 
-    # Run typecheck if available
-    if [[ -f "package.json" ]] && grep -q '"typecheck"' package.json 2>/dev/null; then
-        local typecheck_cmd="$pkg_manager run typecheck"
-        log_info "Running typecheck: $typecheck_cmd"
-        if ! eval "$typecheck_cmd" 2>&1 | tail -10; then
-            ITERATION_ISSUES+=("Typecheck failed")
-            all_passed=false
+    # VISUAL/FUNCTIONAL VERIFICATION
+    # Run if we have UI changes and agent-browser is available
+    if command -v agent-browser &>/dev/null; then
+        local dev_url
+        dev_url=$(get_project_config "dev_url")
+
+        if [[ -n "$dev_url" ]]; then
+            # Check if dev server is running
+            if curl -s --max-time 2 "$dev_url" > /dev/null 2>&1; then
+                log_info "Running visual verification at $dev_url"
+
+                # Create screenshots directory
+                local screenshot_dir=".cr/screenshots"
+                mkdir -p "$screenshot_dir"
+                local timestamp
+                timestamp=$(date '+%Y%m%d-%H%M%S')
+
+                # Open the base page first
+                agent-browser open "$dev_url" 2>/dev/null || true
+                sleep 2  # Wait for page to load
+
+                # Discover all pages via navigation links (like cr design does)
+                local all_pages_raw all_pages
+                all_pages_raw=$(agent-browser eval "Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a, main a')).map(a => a.href).filter(h => h && h.startsWith(window.location.origin)).filter((v,i,a) => a.indexOf(v) === i).join('|')" 2>&1) || true
+
+                # Clean up the output: remove quotes, convert | to newlines
+                all_pages=$(echo "$all_pages_raw" | tr -d '"' | tr -d "'" | tr '|' '\n')
+
+                # Build list of pages to check (base URL + discovered pages, max 5)
+                local pages_to_check=("$dev_url")
+                if [[ -n "$all_pages" ]] && [[ "$all_pages" != *"error"* ]]; then
+                    local page_count=0
+                    while IFS= read -r page; do
+                        # Clean the URL
+                        page=$(echo "$page" | xargs)
+                        [[ -z "$page" ]] && continue
+                        [[ "$page" != http* ]] && continue
+                        [[ "$page" == "$dev_url" ]] && continue
+                        [[ "$page" == "$dev_url/" ]] && continue
+                        [[ "$page" == *"#"* ]] && continue  # Skip anchor links
+                        pages_to_check+=("$page")
+                        page_count=$((page_count + 1))
+                        [[ $page_count -ge 4 ]] && break  # Max 4 additional pages
+                    done <<< "$all_pages"
+                fi
+
+                log_info "Checking ${#pages_to_check[@]} pages: ${pages_to_check[*]}"
+
+                # Check each page
+                local page_issues=()
+                for page_url in "${pages_to_check[@]}"; do
+                    local page_name="${page_url#$dev_url}"
+                    [[ -z "$page_name" ]] && page_name="/"
+
+                    # Open the page
+                    agent-browser open "$page_url" 2>/dev/null || true
+                    sleep 1
+
+                    # Take screenshot
+                    local safe_name="${page_name//\//_}"
+                    [[ "$safe_name" == "_" ]] && safe_name="home"
+                    local screenshot_file="$screenshot_dir/iteration-$timestamp-$safe_name.png"
+                    agent-browser screenshot "$screenshot_file" 2>/dev/null || true
+
+                    if [[ -f "$screenshot_file" ]]; then
+                        log_info "Screenshot: $page_name → $screenshot_file"
+                    fi
+
+                    # Run checks for this page
+                    # Clear any pre-existing errors before running checks
+                    agent-browser errors --clear 2>/dev/null || true
+
+                    # Check 1: Error overlays present?
+                    local has_error_overlay
+                    has_error_overlay=$(agent-browser eval "document.querySelectorAll('[data-nextjs-error], .error-overlay, #webpack-dev-server-client-overlay, [class*=vite-error], .svelte-error-overlay').length" 2>&1) || true
+                    if [[ "$has_error_overlay" =~ ^[0-9]+$ ]] && [[ "$has_error_overlay" -gt 0 ]]; then
+                        ITERATION_ISSUES+=("$page_name: Error overlay detected")
+                        all_passed=false
+                        log_warn "$page_name: Error overlay detected"
+                    fi
+
+                    # Check 2: Page too small/blank?
+                    local body_length
+                    body_length=$(agent-browser eval "document.body ? document.body.innerHTML.trim().length : 0" 2>&1) || true
+                    if [[ "$body_length" =~ ^[0-9]+$ ]] && [[ "$body_length" -lt 50 ]]; then
+                        ITERATION_ISSUES+=("$page_name: Page appears blank")
+                        all_passed=false
+                        log_warn "$page_name: Page appears blank"
+                    fi
+
+                    # Check 3: Interactive elements - buttons on this page
+                    local button_count clickable_buttons
+                    button_count=$(agent-browser eval "document.querySelectorAll('button, [role=button]').length" 2>&1) || true
+                    clickable_buttons=$(agent-browser eval "Array.from(document.querySelectorAll('button, [role=button]')).filter(function(el) { var s = window.getComputedStyle(el); return s.pointerEvents !== 'none' && s.display !== 'none'; }).length" 2>&1) || true
+
+                    if [[ "$button_count" =~ ^[0-9]+$ ]] && [[ "$button_count" -gt 0 ]]; then
+                        if [[ "$clickable_buttons" =~ ^[0-9]+$ ]] && [[ "$clickable_buttons" -eq 0 ]]; then
+                            ITERATION_ISSUES+=("$page_name: All $button_count buttons disabled/hidden")
+                            all_passed=false
+                            log_warn "$page_name: All $button_count buttons disabled/hidden"
+                        else
+                            log_info "$page_name: $clickable_buttons/$button_count buttons clickable"
+                        fi
+                    fi
+
+                    # Check 4: Loading spinners stuck?
+                    local loader_count
+                    loader_count=$(agent-browser eval "document.querySelectorAll('[class*=loading], [class*=spinner], [aria-busy=true]').length" 2>&1) || true
+                    if [[ "$loader_count" =~ ^[0-9]+$ ]] && [[ "$loader_count" -gt 3 ]]; then
+                        ITERATION_ISSUES+=("$page_name: Stuck loading state ($loader_count spinners)")
+                        all_passed=false
+                        log_warn "$page_name: Stuck loading state"
+                    fi
+
+                    # Check 5: Page responsiveness
+                    local start_time end_time duration
+                    start_time=$(date +%s)
+                    local responsive_check
+                    responsive_check=$(agent-browser eval "Date.now()" 2>&1) || true
+                    end_time=$(date +%s)
+                    duration=$((end_time - start_time))
+
+                    if [[ "$duration" -gt 3 ]]; then
+                        ITERATION_ISSUES+=("$page_name: Slow response (${duration}s)")
+                        all_passed=false
+                        log_warn "$page_name: Slow response (${duration}s)"
+                    fi
+
+                    # Check 6: Visible error text
+                    local error_text_check
+                    error_text_check=$(agent-browser eval "document.body && document.body.innerText.match(/Uncaught|ReferenceError|TypeError|SyntaxError|RangeError|out of memory|OOM/i) ? 'ERROR_FOUND' : 'OK'" 2>&1) || true
+                    if [[ "$error_text_check" == "ERROR_FOUND" ]]; then
+                        ITERATION_ISSUES+=("$page_name: Error text visible")
+                        all_passed=false
+                        log_warn "$page_name: Error text visible"
+                    fi
+
+                    # Check 7: Browser console errors (checked last to catch async errors)
+                    local console_errors
+                    console_errors=$(agent-browser errors 2>&1 | sed 's/\x1b\[[0-9;]*m//g') || true
+                    if [[ -n "$console_errors" ]]; then
+                        local error_count
+                        error_count=$(echo "$console_errors" | grep -c -E "." 2>/dev/null || echo "0")
+                        if [[ "$error_count" -gt 0 ]]; then
+                            ITERATION_ISSUES+=("$page_name: Console errors ($error_count lines)")
+                            all_passed=false
+                            log_warn "$page_name: Console errors detected ($error_count lines)"
+                            # Log first few errors for context
+                            echo "$console_errors" | head -3 | while read -r line; do
+                                [[ -n "$line" ]] && log_warn "  $line"
+                            done
+                        fi
+                    fi
+                done
+
+                # Close the browser to clean up
+                agent-browser close 2>/dev/null || true
+            else
+                log_info "Dev server not running at $dev_url - skipping visual verification"
+            fi
         fi
     fi
 
@@ -587,6 +930,41 @@ run_iteration_checks() {
     else
         return 1
     fi
+}
+
+# Check if a learning is harmful and should be rejected
+# Returns 0 (true) if the learning should be blocked
+# Harmful patterns: encourage skipping, ignoring, or dismissing quality gate failures
+is_harmful_learning() {
+    local learning="$1"
+    local learning_lower
+    learning_lower=$(echo "$learning" | tr '[:upper:]' '[:lower:]')
+
+    # Block patterns that encourage skipping/ignoring quality gates
+    local harmful_patterns=(
+        "pre-existing.*skip"
+        "pre-existing.*ignore"
+        "pre-existing.*resolve.*immediately"
+        "skip.*check"
+        "skip.*gate"
+        "ignore.*failure"
+        "ignore.*error"
+        "mark.*resolved.*immediately"
+        "resolve.*by updating documentation"
+        "doesn't affect runtime"
+        "documentation rather than.*fix"
+        "not affect.*runtime"
+    )
+
+    for pattern in "${harmful_patterns[@]}"; do
+        if echo "$learning_lower" | grep -qE "$pattern"; then
+            log_warn "BLOCKED harmful learning: $learning"
+            log_warn "Quality gates must NEVER be skipped or ignored"
+            return 0  # true - is harmful
+        fi
+    done
+
+    return 1  # false - not harmful
 }
 
 # Add a learning to .cr/learnings.json
@@ -598,6 +976,12 @@ add_learning() {
     local spec="${4:-unknown}"
     local iteration="${5:-0}"
 
+    # FILTER: Reject harmful learnings that encourage skipping quality gates
+    if is_harmful_learning "$learning"; then
+        log_warn "Rejected harmful learning - quality gates must always be fixed, never skipped"
+        return 0
+    fi
+
     mkdir -p .cr
     local learnings_file=".cr/learnings.json"
 
@@ -606,27 +990,30 @@ add_learning() {
         echo '{"learnings":[]}' > "$learnings_file"
     fi
 
-    # Create new entry
-    local entry
-    entry=$(cat << EOF
-{
-  "date": "$(date -Iseconds)",
-  "spec": "$spec",
-  "iteration": $iteration,
-  "category": "$category",
-  "learning": "$learning",
-  "files": [$(echo "$files" | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/' | sed 's/""/null/g')]
-}
-EOF
-)
-
-    # Append to learnings array
+    # Use jq for safe JSON construction (jq --arg handles escaping automatically)
     if command -v jq &>/dev/null; then
-        jq ".learnings += [$entry]" "$learnings_file" > "$learnings_file.tmp" && mv "$learnings_file.tmp" "$learnings_file"
+        # Build entry safely with jq
+        local files_array="[]"
+        if [[ -n "$files" ]]; then
+            files_array=$(echo "$files" | tr ',' '\n' | jq -R . | jq -s .)
+        fi
+
+        jq --arg date "$(date -Iseconds)" \
+           --arg spec "$spec" \
+           --argjson iteration "$iteration" \
+           --arg category "$category" \
+           --arg learning "$learning" \
+           --argjson files "$files_array" \
+           '.learnings += [{date: $date, spec: $spec, iteration: $iteration, category: $category, learning: $learning, files: $files}]' \
+           "$learnings_file" > "$learnings_file.tmp" && mv "$learnings_file.tmp" "$learnings_file"
     else
-        # Fallback: simple append (less clean but works)
-        sed -i '' 's/\]}/,'"$(echo "$entry" | tr '\n' ' ')"']}/' "$learnings_file" 2>/dev/null || \
-        sed -i 's/\]}/,'"$(echo "$entry" | tr '\n' ' ')"']}/' "$learnings_file"
+        # Fallback: manual JSON construction with escaping (macOS compatible)
+        local escaped_learning escaped_spec
+        escaped_learning=$(printf '%s' "$learning" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
+        escaped_spec=$(printf '%s' "$spec" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        local entry="{\"date\":\"$(date -Iseconds)\",\"spec\":\"$escaped_spec\",\"iteration\":$iteration,\"category\":\"$category\",\"learning\":\"$escaped_learning\",\"files\":[]}"
+        sed -i '' 's/\]}/,'"$entry"']}/' "$learnings_file" 2>/dev/null || \
+        sed -i 's/\]}/,'"$entry"']}/' "$learnings_file"
     fi
 }
 
@@ -676,48 +1063,43 @@ EOF
     fi
 }
 
-# Add a learning to context.yaml
+# Add a learning to context.yaml (optional - data already in learnings.json)
 # Usage: add_context_learning "learning text"
 add_context_learning() {
     local learning="$1"
-    init_context
 
+    # Only write to context.yaml if yq is available
+    # Data is already stored in learnings.json via add_learning()
     if command -v yq &>/dev/null; then
-        yq -i ".learnings += [\"$learning\"]" "$CONTEXT_FILE"
-    else
-        # Fallback: append manually (less clean but works without yq)
-        sed -i '' 's/^learnings: \[\]/learnings:\n  - "'"$learning"'"/' "$CONTEXT_FILE" 2>/dev/null || \
-        echo "  - \"$learning\"" >> "$CONTEXT_FILE"
+        init_context
+        LEARNING="$learning" yq -i '.learnings += [env(LEARNING)]' "$CONTEXT_FILE" 2>/dev/null || true
     fi
 }
 
-# Add an error fix to context.yaml
+# Add an error fix to context.yaml (optional - data already in learnings.json)
 # Usage: add_context_error_fix "error pattern" "fix description"
 add_context_error_fix() {
     local error="$1"
     local fix="$2"
-    init_context
 
+    # Only write to context.yaml if yq is available
+    # Data is already stored in learnings.json via add_learning()
     if command -v yq &>/dev/null; then
-        yq -i ".errors_fixed += [{\"error\": \"$error\", \"fix\": \"$fix\"}]" "$CONTEXT_FILE"
-    else
-        # Fallback: append manually
-        echo "  - error: \"$error\"" >> "$CONTEXT_FILE"
-        echo "    fix: \"$fix\"" >> "$CONTEXT_FILE"
+        init_context
+        ERROR="$error" FIX="$fix" yq -i '.errors_fixed += [{"error": env(ERROR), "fix": env(FIX)}]' "$CONTEXT_FILE" 2>/dev/null || true
     fi
 }
 
-# Add a discovered pattern to context.yaml
+# Add a discovered pattern to context.yaml (optional - data already in learnings.json)
 # Usage: add_context_pattern "pattern description"
 add_context_pattern() {
     local pattern="$1"
-    init_context
 
+    # Only write to context.yaml if yq is available
+    # Data is already stored in learnings.json via add_learning()
     if command -v yq &>/dev/null; then
-        yq -i ".patterns_discovered += [\"$pattern\"]" "$CONTEXT_FILE"
-    else
-        # Fallback: append manually
-        echo "  - \"$pattern\"" >> "$CONTEXT_FILE"
+        init_context
+        PATTERN="$pattern" yq -i '.patterns_discovered += [env(PATTERN)]' "$CONTEXT_FILE" 2>/dev/null || true
     fi
 }
 
@@ -735,14 +1117,23 @@ prune_context() {
 
 # Get context for injection into prompts
 # Returns formatted context string
+# Reads from learnings.json (using jq) with fallback to context.yaml (using yq)
 get_context_for_prompt() {
-    [[ ! -f "$CONTEXT_FILE" ]] && return
-
     local learnings=""
     local errors=""
     local patterns=""
+    local learnings_file=".cr/learnings.json"
 
-    if command -v yq &>/dev/null; then
+    # Prefer learnings.json (uses jq which is more common)
+    if [[ -f "$learnings_file" ]] && command -v jq &>/dev/null; then
+        # Get discovery/success learnings
+        learnings=$(jq -r '.learnings // [] | map(select(.category == "discovery" or .category == "success")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
+        # Get fix learnings
+        errors=$(jq -r '.learnings // [] | map(select(.category == "fix")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
+        # Get pattern learnings
+        patterns=$(jq -r '.learnings // [] | map(select(.category == "pattern")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
+    # Fallback to context.yaml if yq is available
+    elif [[ -f "$CONTEXT_FILE" ]] && command -v yq &>/dev/null; then
         learnings=$(yq -r '.learnings // [] | map("- " + .) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
         errors=$(yq -r '.errors_fixed // [] | map("- " + .error + " → Fix: " + .fix) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
         patterns=$(yq -r '.patterns_discovered // [] | map("- " + .) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
@@ -760,6 +1151,281 @@ ${errors:-None yet}
 ### Patterns Discovered in This Codebase
 ${patterns:-None yet}
 EOF
+}
+
+#=============================================================================
+# CONTEXT PERSISTENCE ENHANCEMENT (Parse and persist learnings from output)
+#=============================================================================
+
+# Parse iteration output for learning markers
+# Extracts COMPLETED, FILES, TESTS, LEARNING, PATTERN, FIXED, BLOCKER markers
+# Usage: parse_iteration_output "$log_file" "$spec_name" "$iteration"
+parse_iteration_output() {
+    local log_file="$1"
+    local spec_name="${2:-unknown}"
+    local iteration="${3:-0}"
+
+    [[ ! -f "$log_file" ]] && return 0
+
+    # Helper to strip markdown bold markers and extract value
+    # Handles both "MARKER: value" and "**MARKER:** value"
+    extract_marker_value() {
+        local line="$1"
+        local marker="$2"
+        # Remove ** prefix/suffix if present, then extract value after marker
+        echo "$line" | sed -E "s/^\*{0,2}${marker}:\*{0,2} *//"
+    }
+
+    # Extract LEARNING markers (handles **LEARNING:** and LEARNING:)
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local learning
+        learning=$(extract_marker_value "$line" "LEARNING")
+        if [[ -n "$learning" ]]; then
+            add_learning "discovery" "$learning" "" "$spec_name" "$iteration"
+            add_context_learning "$learning"
+            log_info "Captured learning: $learning"
+        fi
+    done < <(grep -oE "(\*\*)?LEARNING:(\*\*)? .+" "$log_file" 2>/dev/null || true)
+
+    # Extract PATTERN markers
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local pattern
+        pattern=$(extract_marker_value "$line" "PATTERN")
+        if [[ -n "$pattern" ]]; then
+            add_context_pattern "$pattern"
+            add_learning "pattern" "Pattern: $pattern" "" "$spec_name" "$iteration"
+            log_info "Captured pattern: $pattern"
+        fi
+    done < <(grep -oE "(\*\*)?PATTERN:(\*\*)? .+" "$log_file" 2>/dev/null || true)
+
+    # Extract FIXED markers (format: FIXED: error → solution)
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local fixed
+        fixed=$(extract_marker_value "$line" "FIXED")
+        if [[ -n "$fixed" ]]; then
+            # Parse error and fix from "error → fix" format
+            if [[ "$fixed" == *"→"* ]]; then
+                local error_part="${fixed%% →*}"
+                local fix_part="${fixed#*→ }"
+                add_context_error_fix "$error_part" "$fix_part"
+                add_learning "fix" "Fixed: $fixed" "" "$spec_name" "$iteration"
+                log_info "Captured fix: $error_part → $fix_part"
+            fi
+        fi
+    done < <(grep -oE "(\*\*)?FIXED:(\*\*)? .+" "$log_file" 2>/dev/null || true)
+
+    # Extract COMPLETED markers for success tracking
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local completed
+        completed=$(extract_marker_value "$line" "COMPLETED")
+        if [[ -n "$completed" ]]; then
+            add_learning "success" "Completed: $completed" "" "$spec_name" "$iteration"
+            log_info "Captured completion: $completed"
+        fi
+    done < <(grep -oE "(\*\*)?COMPLETED:(\*\*)? .+" "$log_file" 2>/dev/null || true)
+
+    # Extract BLOCKER markers
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local blocker
+        blocker=$(extract_marker_value "$line" "BLOCKER")
+        if [[ -n "$blocker" ]]; then
+            add_learning "blocker" "Blocker: $blocker" "" "$spec_name" "$iteration"
+            log_warn "Captured blocker: $blocker"
+        fi
+    done < <(grep -oE "(\*\*)?BLOCKER:(\*\*)? .+" "$log_file" 2>/dev/null || true)
+
+    return 0
+}
+
+# Get the previous iteration's log file
+# Usage: get_previous_iteration_log "$history_dir" "$current_iteration"
+get_previous_iteration_log() {
+    local history_dir="$1"
+    local current_iteration="$2"
+
+    [[ ! -d "$history_dir" ]] && return 1
+    [[ "$current_iteration" -le 1 ]] && return 1
+
+    local prev_iteration=$((current_iteration - 1))
+    local prev_prefix=$(printf '%03d' $prev_iteration)
+
+    # Find log file matching the prefix
+    local prev_log
+    prev_log=$(find "$history_dir" -name "${prev_prefix}-*.md" -type f 2>/dev/null | head -1)
+
+    if [[ -n "$prev_log" ]] && [[ -f "$prev_log" ]]; then
+        echo "$prev_log"
+        return 0
+    fi
+
+    return 1
+}
+
+# Generate a summary of the previous iteration
+# Usage: generate_iteration_summary "$log_file"
+generate_iteration_summary() {
+    local log_file="$1"
+
+    [[ ! -f "$log_file" ]] && return 0
+
+    local summary=""
+
+    # Extract key information from the log (handles **MARKER:** and MARKER: formats)
+    local completed
+    completed=$(grep -oE "(\*\*)?COMPLETED:(\*\*)? .+" "$log_file" 2>/dev/null | head -1 | sed -E 's/^\*{0,2}COMPLETED:\*{0,2} *//' || echo "")
+
+    local files
+    files=$(grep -oE "(\*\*)?FILES:(\*\*)? .+" "$log_file" 2>/dev/null | head -1 | sed -E 's/^\*{0,2}FILES:\*{0,2} *//' || echo "")
+
+    local learning
+    learning=$(grep -oE "(\*\*)?LEARNING:(\*\*)? .+" "$log_file" 2>/dev/null | head -1 | sed -E 's/^\*{0,2}LEARNING:\*{0,2} *//' || echo "")
+
+    local fixed
+    fixed=$(grep -oE "(\*\*)?FIXED:(\*\*)? .+" "$log_file" 2>/dev/null | head -1 | sed -E 's/^\*{0,2}FIXED:\*{0,2} *//' || echo "")
+
+    local blocker
+    blocker=$(grep -oE "(\*\*)?BLOCKER:(\*\*)? .+" "$log_file" 2>/dev/null | head -1 | sed -E 's/^\*{0,2}BLOCKER:\*{0,2} *//' || echo "")
+
+    # Check iteration outcome
+    local outcome="unknown"
+    if grep -q "All checks passed" "$log_file" 2>/dev/null; then
+        outcome="success"
+    elif grep -q "Failed:" "$log_file" 2>/dev/null; then
+        outcome="had_issues"
+    fi
+
+    # Build summary
+    if [[ -n "$completed" ]] || [[ -n "$files" ]] || [[ -n "$learning" ]] || [[ -n "$fixed" ]] || [[ -n "$blocker" ]]; then
+        summary="PREVIOUS ITERATION SUMMARY:
+"
+        [[ -n "$completed" ]] && summary+="- COMPLETED: $completed
+"
+        [[ -n "$files" ]] && summary+="- FILES: $files
+"
+        [[ -n "$learning" ]] && summary+="- LEARNING: $learning
+"
+        [[ -n "$fixed" ]] && summary+="- FIXED: $fixed
+"
+        [[ -n "$blocker" ]] && summary+="- BLOCKER: $blocker
+"
+        [[ "$outcome" == "had_issues" ]] && summary+="- Outcome: Had issues that need fixing
+"
+        [[ "$outcome" == "success" ]] && summary+="- Outcome: Checks passed
+"
+    fi
+
+    echo "$summary"
+}
+
+# Find similar error fixes from context.yaml
+# Usage: find_similar_error_fixes "$error_message"
+find_similar_error_fixes() {
+    local error="$1"
+
+    [[ ! -f "$CONTEXT_FILE" ]] && return 0
+    [[ -z "$error" ]] && return 0
+
+    # Extract key terms from error (first 5 significant words)
+    local key_terms
+    key_terms=$(echo "$error" | tr -cs '[:alnum:]' '\n' | grep -v '^$' | head -5 | tr '\n' '|' | sed 's/|$//')
+
+    [[ -z "$key_terms" ]] && return 0
+
+    local matches=""
+    if command -v yq &>/dev/null; then
+        # Search errors_fixed for matches
+        matches=$(yq -r ".errors_fixed // [] | .[] | select(.error | test(\"(?i)($key_terms)\")) | \"- \" + .error + \" → Fix: \" + .fix" "$CONTEXT_FILE" 2>/dev/null || echo "")
+    fi
+
+    if [[ -n "$matches" ]]; then
+        echo "YOU'VE FIXED SIMILAR ERRORS BEFORE:
+$matches"
+    fi
+}
+
+# Find similar fixes in learnings.json
+# Usage: find_similar_fixes_in_learnings "$error_message"
+find_similar_fixes_in_learnings() {
+    local error="$1"
+    local learnings_file=".cr/learnings.json"
+
+    [[ ! -f "$learnings_file" ]] && return 0
+    [[ -z "$error" ]] && return 0
+
+    # Extract key terms from error
+    local key_terms
+    key_terms=$(echo "$error" | tr -cs '[:alnum:]' '\n' | grep -v '^$' | head -5 | tr '\n' '|' | sed 's/|$//')
+
+    [[ -z "$key_terms" ]] && return 0
+
+    local matches=""
+    if command -v jq &>/dev/null; then
+        matches=$(jq -r ".learnings | map(select(.category == \"fix\" and (.learning | test(\"(?i)($key_terms)\")))) | .[-5:] | .[] | \"- \" + .learning" "$learnings_file" 2>/dev/null || echo "")
+    fi
+
+    if [[ -n "$matches" ]]; then
+        echo "$matches"
+    fi
+}
+
+# Refresh PROMPT.md with updated context
+# Call this at the start of each iteration to inject fresh accumulated context
+# Usage: refresh_prompt_context "$spec_dir"
+refresh_prompt_context() {
+    local spec_dir="$1"
+    local prompt_file="$spec_dir/PROMPT.md"
+
+    [[ ! -f "$prompt_file" ]] && return 0
+
+    # Check if the file has context markers
+    if ! grep -q "<!-- CONTEXT_START -->" "$prompt_file" 2>/dev/null; then
+        return 0  # No markers, nothing to refresh
+    fi
+
+    # Get fresh accumulated context
+    local accumulated_ctx
+    accumulated_ctx=$(get_context_for_prompt 2>/dev/null || echo "No accumulated context yet.")
+
+    # Create backup
+    cp "$prompt_file" "$prompt_file.bak"
+
+    # Write context to temp file (awk -v breaks with multi-line strings)
+    local ctx_temp
+    ctx_temp=$(mktemp)
+    printf '%s\n' "$accumulated_ctx" > "$ctx_temp"
+
+    # Use awk to replace content between markers
+    awk -v ctxfile="$ctx_temp" '
+        BEGIN {
+            while ((getline line < ctxfile) > 0) {
+                ctx = ctx (ctx ? "\n" : "") line
+            }
+            close(ctxfile)
+        }
+        /<!-- CONTEXT_START -->/ {
+            print
+            print ctx
+            skip = 1
+            next
+        }
+        /<!-- CONTEXT_END -->/ {
+            skip = 0
+            print
+            next
+        }
+        !skip {
+            print
+        }
+    ' "$prompt_file.bak" > "$prompt_file"
+
+    rm -f "$ctx_temp"
+    log_info "Refreshed context in PROMPT.md"
+    return 0
 }
 
 #=============================================================================
@@ -812,11 +1478,7 @@ add_error_to_prompt() {
         error="${error:0:2000}... [truncated]"
     fi
 
-    # Escape special characters for safe insertion
-    local escaped_error
-    escaped_error=$(printf '%s' "$error" | sed 's/[&/\]/\\&/g' | sed ':a;N;$!ba;s/\n/\\n/g')
-
-    # Append error context to prompt
+    # Append error context to prompt (heredoc handles the content safely)
     cat >> "$prompt_file" << EOF
 
 ---
@@ -902,6 +1564,8 @@ discover_quality_commands() {
                 [[ -n "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && \
                     quality_commands+=("bun run typecheck")
                 # Fallback to tsc if no typecheck script but tsconfig exists
+                # Note: Framework-specific checks (Astro, Next, etc.) should be in SPEC.md Quality Gates
+                # They are discovered by the LLM during cr spec, not hardcoded here
                 if [[ -z "$(jq -r '.scripts.typecheck // empty' package.json 2>/dev/null)" ]] && [[ -f "tsconfig.json" ]]; then
                     quality_commands+=("bunx tsc --noEmit")
                 fi
@@ -1105,17 +1769,41 @@ verify_integration() {
         fi
     fi
 
-    # 4. Run tests using discovered command
-    local test_cmd
-    test_cmd=$(get_project_config "commands.test")
-    if [[ -n "$test_cmd" ]]; then
-        log_info "Running tests: $test_cmd"
-        if ! eval "CI=true $test_cmd" 2>/dev/null; then
-            INTEGRATION_FAILURES+=("Tests failed: $test_cmd")
-            all_passed=false
+    # 4. Run tests - SPEC-DRIVEN: use SPEC.md quality gates if available
+    local tests_run=0
+
+    # Try SPEC-driven test commands first
+    if [[ -n "${CURRENT_SPEC_DIR:-}" ]] && [[ -f "${CURRENT_SPEC_DIR}/SPEC.md" ]]; then
+        local spec_file="${CURRENT_SPEC_DIR}/SPEC.md"
+        while IFS= read -r cmd; do
+            [[ -z "$cmd" ]] && continue
+            # Skip non-test commands (build, screenshot, etc.)
+            [[ "$cmd" == *"build"* ]] && continue
+            [[ "$cmd" == *"screenshot"* ]] && continue
+            [[ "$cmd" == *"agent-browser"* ]] && continue
+
+            log_info "Running SPEC test: $cmd"
+            tests_run=$((tests_run + 1))
+            if ! eval "CI=true $cmd" 2>&1 | tail -20; then
+                INTEGRATION_FAILURES+=("Tests failed: $cmd")
+                all_passed=false
+            fi
+        done < <(get_spec_quality_commands "$spec_file")
+    fi
+
+    # Fallback to project.json test command if no SPEC tests
+    if [[ $tests_run -eq 0 ]]; then
+        local test_cmd
+        test_cmd=$(get_project_config "commands.test")
+        if [[ -n "$test_cmd" ]]; then
+            log_info "Running tests: $test_cmd"
+            if ! eval "CI=true $test_cmd" 2>/dev/null; then
+                INTEGRATION_FAILURES+=("Tests failed: $test_cmd")
+                all_passed=false
+            fi
+        else
+            log_warn "No test command discovered"
         fi
-    else
-        log_warn "No test command discovered"
     fi
 
     # 5. Run e2e tests if discovered
@@ -1635,112 +2323,90 @@ cmd_spec() {
     local abs_spec_dir
     abs_spec_dir=$(cd "$spec_dir" && pwd)
 
-    # Detect project type for quality gates
+    # Detect project type (used for hints, but quality gates are LLM-discovered)
     local project_type
     project_type=$(detect_project_type ".")
 
-    # Generate quality gates based on project type and available scripts
-    local quality_gates=""
-    case "$project_type" in
-        bun)
-            quality_gates=""
-            has_script "test" && quality_gates+="- [ ] Tests pass: \`bun test\`"$'\n'
-            has_script "lint" && quality_gates+="- [ ] Lint clean: \`bun run lint\`"$'\n'
-            if has_script "typecheck"; then
-                quality_gates+="- [ ] Types check: \`bun run typecheck\`"$'\n'
-            elif [[ -f "tsconfig.json" ]]; then
-                quality_gates+="- [ ] Types check: \`bunx tsc --noEmit\`"$'\n'
-            fi
-            has_script "build" && quality_gates+="- [ ] Build succeeds: \`bun run build\`"
-            # Trim trailing newline
-            quality_gates="${quality_gates%$'\n'}"
-            ;;
-        npm|yarn|pnpm)
-            quality_gates=""
-            has_script "test" && quality_gates+="- [ ] Tests pass: \`$project_type run test\`"$'\n'
-            has_script "lint" && quality_gates+="- [ ] Lint clean: \`$project_type run lint\`"$'\n'
-            if has_script "typecheck"; then
-                quality_gates+="- [ ] Types check: \`$project_type run typecheck\`"$'\n'
-            elif [[ -f "tsconfig.json" ]]; then
-                quality_gates+="- [ ] Types check: \`npx tsc --noEmit\`"$'\n'
-            fi
-            has_script "build" && quality_gates+="- [ ] Build succeeds: \`$project_type run build\`"
-            quality_gates="${quality_gates%$'\n'}"
-            ;;
-        rails)
-            quality_gates="- [ ] Tests pass: \`bin/rails test\`
-- [ ] Lint clean: \`bundle exec rubocop\`"
-            [[ -f "Gemfile" ]] && grep -q "brakeman" Gemfile && \
-                quality_gates+=$'\n'"- [ ] Security check: \`bundle exec brakeman -q\`"
-            ;;
-        python)
-            quality_gates=""
-            [[ -f "pytest.ini" || -f "pyproject.toml" ]] && quality_gates+="- [ ] Tests pass: \`pytest\`"$'\n'
-            [[ -f "pyproject.toml" ]] && grep -q "ruff" pyproject.toml 2>/dev/null && \
-                quality_gates+="- [ ] Lint clean: \`ruff check .\`"$'\n'
-            [[ -f "pyproject.toml" ]] && grep -q "mypy" pyproject.toml 2>/dev/null && \
-                quality_gates+="- [ ] Types check: \`mypy .\`"
-            quality_gates="${quality_gates%$'\n'}"
-            ;;
-        *)
-            quality_gates="- [ ] Tests pass: \`<add test command>\`
-- [ ] Lint clean: \`<add lint command>\`"
-            ;;
-    esac
+    # Check if this is a greenfield project (no package manager files)
+    local is_greenfield="false"
+    if [[ ! -f "package.json" ]] && [[ ! -f "Gemfile" ]] && [[ ! -f "pyproject.toml" ]] && \
+       [[ ! -f "go.mod" ]] && [[ ! -f "Cargo.toml" ]]; then
+        is_greenfield="true"
+    fi
 
-    # If no quality gates were detected, add placeholder
-    [[ -z "$quality_gates" ]] && quality_gates="- [ ] Add quality gates for your project"
-
-    # Build dynamic validation command based on available scripts
-    local validate_cmd=""
-    case "$project_type" in
-        bun)
-            has_script "lint" && validate_cmd+="bun run lint"
-            if has_script "typecheck"; then
-                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
-                validate_cmd+="bun run typecheck"
-            elif [[ -f "tsconfig.json" ]]; then
-                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
-                validate_cmd+="bunx tsc --noEmit"
-            fi
-            ;;
-        npm|yarn|pnpm)
-            has_script "lint" && validate_cmd+="$project_type run lint"
-            if has_script "typecheck"; then
-                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
-                validate_cmd+="$project_type run typecheck"
-            elif [[ -f "tsconfig.json" ]]; then
-                [[ -n "$validate_cmd" ]] && validate_cmd+=" && "
-                validate_cmd+="npx tsc --noEmit"
-            fi
-            ;;
-        *)
-            validate_cmd="<add validation command>"
-            ;;
-    esac
-    [[ -z "$validate_cmd" ]] && validate_cmd="# No validation scripts found"
-
-    # Build install command
-    local install_cmd=""
-    case "$project_type" in
-        bun) install_cmd="bun install" ;;
-        npm) install_cmd="npm install" ;;
-        yarn) install_cmd="yarn install" ;;
-        pnpm) install_cmd="pnpm install" ;;
-        *) install_cmd="# Install dependencies" ;;
-    esac
+    # Quality gates are now discovered by Claude, not hardcoded here
+    # Claude will: extract from plan, discover from project files, or infer from plan text
 
     log_info "Reading plan and converting to SPEC format..."
+    log_info "Project type detected: $project_type (greenfield: $is_greenfield)"
     echo ""
 
-    # Use Claude to convert plan to SPEC with enforced task structure
+    # Use Claude to convert plan to SPEC with LLM-driven quality gate discovery
     local conversion_prompt="You are converting a plan document into a SPEC.md file for autonomous implementation.
 
 READ the plan file: $abs_plan_file
 
+Also examine the current project directory for existing config files:
+- package.json, tsconfig.json, eslint.config.*, vite.config.*, astro.config.*
+- Gemfile, .rubocop.yml
+- pyproject.toml, pytest.ini, ruff.toml
+- go.mod, Cargo.toml
+- Any other relevant config files
+
+Project info: type=$project_type, greenfield=$is_greenfield
+
 Then CREATE the file: $abs_spec_dir/SPEC.md
 
-The SPEC.md MUST follow this EXACT format with ENFORCED task structure:
+---
+
+## QUALITY GATE DISCOVERY (CRITICAL - DO NOT SKIP)
+
+You MUST populate the Quality Gates section. Follow this priority order:
+
+### Priority 1: Extract from Plan
+If the plan has a \"Quality Gates\" or \"### Quality Gates\" section:
+- Copy those commands EXACTLY as written
+- They are authoritative
+
+### Priority 2: Discover from Project Files
+If the project has existing config files (package.json, Gemfile, pyproject.toml, etc.):
+- Read the files to find available scripts/commands
+- For package.json: check scripts.test, scripts.lint, scripts.typecheck, scripts.build, scripts.check
+- For Gemfile: look for test gems (rspec, minitest), linters (rubocop), type checkers (sorbet)
+- For pyproject.toml: look for pytest, ruff, mypy, black configurations
+- Generate gates for commands that ACTUALLY EXIST in the config
+
+### Priority 3: Infer from Plan Text (Greenfield Projects)
+If the project directory is empty/minimal AND the plan mentions technologies:
+
+| Plan Mentions | Inferred Quality Gates |
+|---------------|------------------------|
+| \"astro\" | \\\`bunx astro check\\\`, \\\`bunx astro build\\\` |
+| \"next\", \"nextjs\" | \\\`next lint\\\`, \\\`next build\\\` |
+| \"vite\" | \\\`vite build\\\` |
+| \"vitest\" | \\\`vitest run\\\` |
+| \"jest\" | \\\`jest\\\` or \\\`npm test\\\` |
+| \"typescript\", \"tsx\" | \\\`tsc --noEmit\\\` or \\\`bunx tsc --noEmit\\\` |
+| \"eslint\" | \\\`eslint .\\\` |
+| \"prettier\" | \\\`prettier --check .\\\` |
+| \"rails\", \"ruby on rails\" | \\\`bin/rails test\\\`, \\\`bundle exec rubocop\\\` |
+| \"rspec\" | \\\`bundle exec rspec\\\` |
+| \"python\", \"fastapi\", \"django\", \"flask\" | \\\`pytest\\\` |
+| \"ruff\" | \\\`ruff check .\\\` |
+| \"mypy\" | \\\`mypy .\\\` |
+| \"go\", \"golang\" | \\\`go test ./...\\\`, \\\`go vet ./...\\\` |
+| \"rust\", \"cargo\" | \\\`cargo test\\\`, \\\`cargo clippy\\\` |
+
+For greenfield projects, add this comment above Full Gates:
+\\\`<!-- PROVISIONAL: Inferred from plan. Task 1 MUST verify these work. -->\\\`
+
+### Priority 4: Placeholder
+If you cannot determine quality gates:
+\\\`<!-- TODO: Discover quality gates in iteration 1 -->\\\`
+
+---
+
+The SPEC.md MUST follow this EXACT format:
 
 ---
 name: $feature_name
@@ -1777,26 +2443,21 @@ TASK ORDERING RULES (ENFORCED):
 ### Pending
 
 #### Phase 1: Setup (MUST COMPLETE BEFORE IMPLEMENTATION)
-- [ ] Task 1: Install dependencies and verify all quality gates run
-  - Run: \`$install_cmd\`
-  - Verify: All quality gate commands execute (even if they fail)
-  - **Blocker if skipped**: Cannot run backpressure without dependencies
+- [ ] Task 1: Setup project and verify quality gates
+  - Install dependencies (use appropriate package manager for project type)
+  - Run each quality gate command from the Quality Gates section below
+  - If any command fails (not found, wrong syntax), find the correct command
+  - Update this SPEC.md with verified working commands
+  - **Blocker if skipped**: Cannot run backpressure without working quality gates
 
 #### Phase 2: Implementation (Each task includes its own validation)
 [Break down the plan into small tasks. EACH TASK MUST INCLUDE:]
 
 - [ ] Task N: [Create/modify source file]
-  - File: \`src/path/to/file.ts\`
-  - Test: \`tests/unit/file.test.ts\` (CREATE IN SAME ITERATION)
-  - Validate: \`$validate_cmd\`
-  - Visual: (if UI component) \`agent-browser screenshot localhost:PORT/path\`
-
-[Example for a UI component:]
-- [ ] Task N: Create Header component
-  - File: \`src/components/Header.tsx\`
-  - Test: \`tests/unit/Header.test.tsx\` (CREATE IN SAME ITERATION)
-  - Validate: \`$validate_cmd\`
-  - Visual: \`agent-browser screenshot localhost:3000\` (REQUIRED FOR UI)
+  - File: \\\`src/path/to/file.ts\\\`
+  - Test: \\\`tests/unit/file.test.ts\\\` (CREATE IN SAME ITERATION)
+  - Validate: Run quality gates after changes
+  - Visual: (if UI component) \\\`agent-browser screenshot localhost:PORT/path\\\`
 
 #### Phase 3: Integration (After all implementation tasks)
 - [ ] Task N: Run full test suite and verify all integrations work
@@ -1824,7 +2485,11 @@ BACKPRESSURE RULES (ENFORCED):
 - [ ] Related tests pass (the test file you created with the source file)
 
 ### Full Gates (run after each iteration)
-$quality_gates
+[DISCOVER THESE using the priority order above - extract from plan, discover from project, or infer from plan text]
+- [ ] Tests pass: \\\`<discovered command>\\\`
+- [ ] Lint clean: \\\`<discovered command>\\\`
+- [ ] Types check: \\\`<discovered command>\\\`
+- [ ] Build succeeds: \\\`<discovered command>\\\`
 
 ### Visual Gates (run after UI changes)
 - [ ] Screenshot captured with agent-browser
@@ -1849,8 +2514,8 @@ $quality_gates
 
 | Source File | Test File | Visual Check |
 |-------------|-----------|--------------|
-| \`src/path/to/file.ts\` | \`tests/unit/file.test.ts\` | No |
-| \`src/components/UI.tsx\` | \`tests/unit/UI.test.tsx\` | Yes - screenshot |
+| \\\`src/path/to/file.ts\\\` | \\\`tests/unit/file.test.ts\\\` | No |
+| \\\`src/components/UI.tsx\\\` | \\\`tests/unit/UI.test.tsx\\\` | Yes - screenshot |
 
 ### Patterns to Follow
 
@@ -1863,7 +2528,7 @@ $quality_gates
 ## Iteration Log
 
 CRITICAL RULES:
-1. Task 1 MUST ALWAYS be 'Install dependencies' - NEVER start implementation without this
+1. Task 1 MUST setup dependencies AND verify quality gates work - NEVER skip this
 2. EVERY implementation task MUST specify a test file to create IN THE SAME ITERATION
 3. UI tasks MUST include a Visual line with agent-browser command
 4. NEVER create 'run tests' or 'run lint' as separate tasks at the end - these run PER TASK
@@ -1873,6 +2538,7 @@ CRITICAL RULES:
 8. Include file paths where known
 9. Copy any patterns/conventions mentioned in the plan to the Patterns section
 10. DO NOT include placeholder text like 'Requirement 1' - use actual content from the plan
+11. Quality gates MUST have actual commands, not placeholders - discover them!
 
 Write the SPEC.md file now."
 
@@ -1917,7 +2583,11 @@ See plan file for details.
 
 ## Quality Gates
 
-$quality_gates
+<!-- TODO: Discover quality gates in iteration 1 -->
+<!-- Check plan for explicit gates, or discover from project config files -->
+- [ ] Tests pass: \`<discover in iteration 1>\`
+- [ ] Lint clean: \`<discover in iteration 1>\`
+- [ ] Types check: \`<discover in iteration 1>\`
 
 ## Exit Criteria
 
@@ -1947,6 +2617,39 @@ EOF
     if [[ -f "$CR_DIR/templates/PROMPT-template.md" ]]; then
         cp "$CR_DIR/templates/PROMPT-template.md" "$spec_dir/PROMPT.md"
         log_success "Created $spec_dir/PROMPT.md (from template)"
+
+        # Substitute {{ACCUMULATED_CONTEXT}} placeholder with actual context
+        if [[ -f "$spec_dir/PROMPT.md" ]]; then
+            local accumulated_ctx
+            accumulated_ctx=$(get_context_for_prompt 2>/dev/null || echo "No accumulated context yet.")
+
+            # Check if there's actual content to inject
+            if [[ -n "$accumulated_ctx" ]]; then
+                # Write context to temp file for safe multi-line substitution
+                local ctx_temp
+                ctx_temp=$(mktemp)
+                printf '%s' "$accumulated_ctx" > "$ctx_temp"
+
+                # Use Perl for reliable multi-line substitution (handles special chars)
+                if command -v perl &>/dev/null; then
+                    perl -i -pe "
+                        BEGIN { local \$/; open(F, '<', '$ctx_temp'); \$ctx = <F>; close(F); }
+                        s/\{\{ACCUMULATED_CONTEXT\}\}/\$ctx/g;
+                    " "$spec_dir/PROMPT.md"
+                else
+                    # Fallback: use awk with file read
+                    awk -v ctxfile="$ctx_temp" '
+                        BEGIN { while ((getline line < ctxfile) > 0) ctx = ctx (ctx ? "\n" : "") line }
+                        /\{\{ACCUMULATED_CONTEXT\}\}/ { gsub(/\{\{ACCUMULATED_CONTEXT\}\}/, ctx) }
+                        { print }
+                    ' "$spec_dir/PROMPT.md" > "$spec_dir/PROMPT.md.tmp" && \
+                    mv "$spec_dir/PROMPT.md.tmp" "$spec_dir/PROMPT.md"
+                fi
+
+                rm -f "$ctx_temp"
+                log_info "Injected accumulated context into PROMPT.md"
+            fi
+        fi
     else
         # Fallback: create inline with enforced backpressure
         cat > "$spec_dir/PROMPT.md" << 'PROMPT'
@@ -2165,6 +2868,22 @@ cmd_implement() {
     init_context
     prune_context
 
+    # Check if PROMPT.md is outdated compared to template
+    local prompt_file="$spec_dir/PROMPT.md"
+    local template_file="$CR_DIR/templates/PROMPT-template.md"
+    if [[ -f "$prompt_file" ]] && [[ -f "$template_file" ]]; then
+        local prompt_time template_time
+        prompt_time=$(stat -f %m "$prompt_file" 2>/dev/null || stat -c %Y "$prompt_file" 2>/dev/null || echo 0)
+        template_time=$(stat -f %m "$template_file" 2>/dev/null || stat -c %Y "$template_file" 2>/dev/null || echo 0)
+
+        if [[ "$template_time" -gt "$prompt_time" ]]; then
+            log_warn "PROMPT.md is older than the template and may be missing recent improvements"
+            log_warn "Run 'cr spec <plan-file> --force' to regenerate from latest template"
+            log_warn "Or run 'cr reset-context $spec_dir' to clear accumulated context"
+            echo ""
+        fi
+    fi
+
     log_step "Starting Compound Ralph Loop"
     echo "Spec:           $spec_file"
     echo "Max iterations: $MAX_ITERATIONS"
@@ -2181,6 +2900,9 @@ cmd_implement() {
     # Get absolute path to spec directory
     local abs_spec_dir
     abs_spec_dir=$(cd "$spec_dir" && pwd)
+
+    # Export for use by run_iteration_checks
+    CURRENT_SPEC_DIR="$abs_spec_dir"
 
     while [[ $iteration -lt $MAX_ITERATIONS ]]; do
         iteration=$((iteration + 1))
@@ -2229,16 +2951,32 @@ cmd_implement() {
         echo -e "${CYAN}${BOLD}=== Iteration $iteration ($timestamp) ===${NC}"
         echo ""
 
+        # Clear gate failures from previous iteration (each iteration gets fresh tracking)
+        rm -f .cr/gate_failures.txt
+
         # Log file for this iteration
         local log_file="$history_dir/$(printf '%03d' $iteration)-$(date '+%Y%m%d-%H%M%S').md"
 
         # Build iteration context
         local issues_context=""
         if [[ -n "${PENDING_ISSUES:-}" ]]; then
+            # Look for similar errors we've fixed before
+            local similar_fixes=""
+            similar_fixes=$(find_similar_error_fixes "${PENDING_ISSUES}" 2>/dev/null || true)
+            if [[ -z "$similar_fixes" ]]; then
+                similar_fixes=$(find_similar_fixes_in_learnings "${PENDING_ISSUES}" 2>/dev/null || true)
+            fi
+
             issues_context="
 ISSUES FROM PREVIOUS ITERATION (fix these first!):
 - ${PENDING_ISSUES}
-
+"
+            if [[ -n "$similar_fixes" ]]; then
+                issues_context+="
+$similar_fixes
+"
+            fi
+            issues_context+="
 Before continuing with tasks, address these issues."
         fi
 
@@ -2265,15 +3003,29 @@ $accumulated_context"
             fi
         fi
 
+        # Refresh PROMPT.md with latest accumulated context
+        refresh_prompt_context "$abs_spec_dir"
+
+        # Generate summary from previous iteration (if any)
+        local prev_iteration_summary=""
+        if [[ $iteration -gt 1 ]]; then
+            local prev_log
+            prev_log=$(get_previous_iteration_log "$history_dir" "$iteration" 2>/dev/null || true)
+            if [[ -n "$prev_log" ]] && [[ -f "$prev_log" ]]; then
+                prev_iteration_summary=$(generate_iteration_summary "$prev_log" 2>/dev/null || true)
+            fi
+        fi
+
         # Create the iteration prompt
         local iteration_prompt="You are in iteration $iteration of a Compound Ralph implementation loop.
-
+$prev_iteration_summary
 CRITICAL INSTRUCTIONS:
 1. Read $abs_spec_dir/SPEC.md - this is your single source of truth
 2. Read $abs_spec_dir/PROMPT.md - this contains your detailed instructions
 3. Follow the phases in PROMPT.md exactly
 4. Complete ONE task, run quality checks, update SPEC.md
 5. If ALL exit criteria are met, output <loop-complete>Feature complete</loop-complete>
+6. Output LEARNING/PATTERN/FIXED markers to help future iterations learn
 $issues_context$learnings_context$accumulated_context
 
 Start by reading both files now."
@@ -2357,10 +3109,76 @@ Start by reading both files now."
             } >> "$log_file"
         fi
 
+        # Parse iteration output for learnings (COMPLETED, LEARNING, PATTERN, FIXED markers)
+        parse_iteration_output "$log_file" "$(basename "$spec_dir")" "$iteration"
+
         # Check for completion signal in log (support both old and new format)
         # Match the FULL tag with closing to avoid false positives like "Not outputting `<loop-complete>`"
         if grep -qE "<loop-complete>.*</loop-complete>|<promise>COMPLETE</promise>" "$log_file"; then
             echo ""
+
+            # If per-iteration checks failed, don't accept completion
+            if [[ ${#ITERATION_ISSUES[@]} -gt 0 ]]; then
+                log_warn "Claude signaled completion but per-iteration checks failed:"
+                for issue in "${ITERATION_ISSUES[@]}"; do
+                    log_warn "  - $issue"
+                done
+                echo ""
+                log_error "=== COMPLETION REJECTED ==="
+                log_error "You MUST fix these errors before completion is accepted."
+                log_error ""
+                log_error "DO NOT:"
+                log_error "  - Dismiss errors as 'pre-existing'"
+                log_error "  - Signal <loop-complete> again without fixing"
+                log_error "  - Add documentation instead of fixing"
+                log_error ""
+                log_error "DO:"
+                log_error "  - Read the actual error messages"
+                log_error "  - Fix the root cause of each error"
+                log_error "  - Run the quality gate again to verify"
+                log_error ""
+                log_error "If a gate is TRULY unfixable (requires external API key, etc.):"
+                log_error "  - Mark it as [INFORMATIONAL] in SPEC.md Quality Gates"
+                log_error "  - Example: '- [ ] [INFORMATIONAL] External API: \`curl ...\`'"
+                log_error ""
+                log_info "Continuing loop to address issues..."
+
+                # Add issues to SPEC for next iteration with clear instructions
+                {
+                    echo ""
+                    echo "### Quality Gate Failures - MUST FIX (Auto-added iteration $iteration)"
+                    echo ""
+                    echo "**These errors MUST be fixed before completion will be accepted.**"
+                    echo ""
+                    echo "Do NOT:"
+                    echo "- Dismiss as 'pre-existing' - fix them anyway"
+                    echo "- Signal completion again without fixing"
+                    echo "- Document the errors instead of fixing them"
+                    echo ""
+                    echo "Failing gates:"
+                    for issue in "${ITERATION_ISSUES[@]}"; do
+                        echo "- [ ] $issue"
+                    done
+                    echo ""
+
+                    # Include ACTUAL ERROR OUTPUT so agent knows what to fix
+                    if [[ -f ".cr/gate_failures.txt" ]]; then
+                        echo "**Actual error output (READ THIS TO UNDERSTAND WHAT TO FIX):**"
+                        echo ""
+                        echo '```'
+                        # Include up to 100 lines of errors (enough context, not overwhelming)
+                        head -100 .cr/gate_failures.txt
+                        echo '```'
+                        echo ""
+                    fi
+
+                    echo "Fix these specific errors. Do not proceed until they are resolved."
+                } >> "$spec_file"
+
+                sleep "$ITERATION_DELAY"
+                continue
+            fi
+
             log_info "Claude signals completion. Verifying integration..."
 
             # Detect project type for verification
@@ -3984,6 +4802,113 @@ cmd_learnings() {
 }
 
 #=============================================================================
+# RESET CONTEXT COMMAND
+#=============================================================================
+
+cmd_reset_context() {
+    local spec_dir="${1:-}"
+
+    if [[ -z "$spec_dir" ]]; then
+        log_error "Usage: cr reset-context <spec-dir>"
+        log_info "Example: cr reset-context specs/feat-task-manager/"
+        exit 1
+    fi
+
+    # Normalize path
+    spec_dir="${spec_dir%/}"  # Remove trailing slash
+    if [[ ! -d "$spec_dir" ]]; then
+        log_error "Spec directory not found: $spec_dir"
+        exit 1
+    fi
+
+    local prompt_file="$spec_dir/PROMPT.md"
+    if [[ ! -f "$prompt_file" ]]; then
+        log_error "PROMPT.md not found in $spec_dir"
+        exit 1
+    fi
+
+    log_warn "This will reset all accumulated context in $spec_dir/PROMPT.md"
+    log_warn "Use this when the agent has learned harmful patterns (e.g., skipping quality gates)"
+    echo ""
+
+    # Create backup
+    cp "$prompt_file" "$prompt_file.backup.$(date +%Y%m%d-%H%M%S)"
+    log_info "Created backup of PROMPT.md"
+
+    # Replace the context between markers with fresh empty context
+    if grep -q "<!-- CONTEXT_START -->" "$prompt_file" 2>/dev/null; then
+        local fresh_context="## Accumulated Context (from previous iterations)
+
+### Learnings
+(No learnings yet - this context was reset)
+
+### Errors You've Fixed Before (Don't Repeat)
+(None yet)
+
+### Patterns Discovered in This Codebase
+(None yet)"
+
+        # Write fresh context to temp file
+        local ctx_temp
+        ctx_temp=$(mktemp)
+        printf '%s\n' "$fresh_context" > "$ctx_temp"
+
+        # Use awk to replace content between markers
+        awk -v ctxfile="$ctx_temp" '
+            BEGIN {
+                while ((getline line < ctxfile) > 0) {
+                    ctx = ctx (ctx ? "\n" : "") line
+                }
+                close(ctxfile)
+            }
+            /<!-- CONTEXT_START -->/ {
+                print
+                print ctx
+                skip = 1
+                next
+            }
+            /<!-- CONTEXT_END -->/ {
+                skip = 0
+            }
+            !skip { print }
+        ' "$prompt_file" > "$prompt_file.tmp" && mv "$prompt_file.tmp" "$prompt_file"
+
+        rm -f "$ctx_temp"
+        log_success "Reset accumulated context in PROMPT.md"
+    else
+        log_warn "No context markers found in PROMPT.md - nothing to reset"
+    fi
+
+    # Also reset .cr/learnings.json if it exists and relates to this spec
+    local learnings_file=".cr/learnings.json"
+    if [[ -f "$learnings_file" ]] && command -v jq &>/dev/null; then
+        local spec_name
+        spec_name=$(basename "$spec_dir")
+        # Filter out learnings for this spec that contain harmful patterns
+        jq --arg spec "$spec_name" '
+            .learnings = [.learnings[] | select(
+                (.spec != $spec) or
+                ((.learning | test("pre-existing|skip|ignore|dismiss"; "i")) | not)
+            )]
+        ' "$learnings_file" > "$learnings_file.tmp" && mv "$learnings_file.tmp" "$learnings_file"
+        log_info "Cleaned harmful learnings from .cr/learnings.json"
+    fi
+
+    # Also reset context.yaml if it exists
+    if [[ -f "$CONTEXT_FILE" ]] && command -v yq &>/dev/null; then
+        # Filter out harmful patterns
+        yq -i '.learnings = [.learnings[] | select(. | test("pre-existing|skip|ignore|dismiss"; "i") | not)]' "$CONTEXT_FILE" 2>/dev/null || true
+        yq -i '.errors_fixed = [.errors_fixed[] | select(.fix | test("skip|ignore|dismiss"; "i") | not)]' "$CONTEXT_FILE" 2>/dev/null || true
+        yq -i '.patterns_discovered = [.patterns_discovered[] | select(. | test("pre-existing|skip|ignore|dismiss"; "i") | not)]' "$CONTEXT_FILE" 2>/dev/null || true
+        log_info "Cleaned harmful patterns from .cr/context.yaml"
+    fi
+
+    log_success "Context reset complete"
+    log_info "The agent will start fresh without harmful learned patterns"
+    log_info "Run 'cr implement $spec_dir' to continue"
+}
+
+#=============================================================================
 # HELP COMMAND
 #=============================================================================
 
@@ -4047,6 +4972,11 @@ COMMANDS:
     learnings [cat]     View project learnings from .cr/learnings.json
         [limit]         Number of entries to show (default: 20)
                         Categories: environment, pattern, gotcha, fix, discovery
+
+    reset-context       Reset accumulated context for a stuck spec
+        <spec-dir>      Use when agent has learned harmful patterns
+                        (e.g., dismissing errors as "pre-existing")
+                        Clears bad learnings, allows fresh start
 
     help                Show this help
 
@@ -4151,6 +5081,9 @@ main() {
             ;;
         learnings)
             cmd_learnings "$@"
+            ;;
+        reset-context)
+            cmd_reset_context "$@"
             ;;
         help|--help|-h)
             cmd_help
