@@ -118,6 +118,36 @@ cr compound user-authentication
 CONVERSE → RESEARCH → PLAN → IMPLEMENT → REVIEW → COMPOUND
 ```
 
+## Extended Workflow
+
+For more complex features, extend the basic workflow with review and knowledge extraction:
+
+```bash
+# 8. Review the implementation
+cr review
+# Multi-dimensional code review, creates todos for issues
+
+# 9. Extract learnings (COMPOUND PHASE)
+cr compound user-authentication
+# Captures patterns, decisions, pitfalls for future work
+# Every feature should make subsequent features easier
+```
+
+### Full Workflow Diagram
+
+```
+CONVERSE → RESEARCH → PLAN → IMPLEMENT → REVIEW → COMPOUND
+     ↓          ↓        ↓          ↓        ↓
+  Explore   Investigate  Plan    Build    Learn
+```
+
+### Review & Compound Phases
+
+| Phase | Mode | Your Role |
+|-------|------|-----------|
+| **Review** | Interactive | Review findings, approve or request fixes |
+| **Compound** | Interactive | Review extracted learnings, add insights |
+
 ## Three Modes
 
 | Phase | Mode | Your Role |

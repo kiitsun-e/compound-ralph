@@ -2320,6 +2320,9 @@ cmd_converse() {
     echo ""
 
     local converse_prompt
+    # Prompts embedded inline for portability (self-contained distribution).
+    # Trade-off: Inline = self-contained but larger file; File = modular but requires filesystem.
+    # See comments above cmd_compound() for details on the trade-off.
     read -r -d '' converse_prompt << CONVERSE_EOF || true
 You are a Conversationalist - a curious, thoughtful conversation partner.
 
@@ -2539,6 +2542,9 @@ cmd_research() {
     echo ""
 
     local research_prompt
+    # Prompts embedded inline for portability (self-contained distribution).
+    # Trade-off: Inline = self-contained but larger file; File = modular but requires filesystem.
+    # See comments above cmd_compound() for details on the trade-off.
     read -r -d '' research_prompt << RESEARCH_EOF || true
 You are a Researcher - a thorough, evidence-based investigator.
 
@@ -4761,6 +4767,10 @@ cmd_compound() {
     echo -e "${YELLOW}Starting Claude...${NC}"
     echo ""
 
+    # Note: Prompts are embedded inline for portability (single-file distribution).
+    # Alternative approach: Extract to prompts/compound.txt and read with cat.
+    # Trade-off: Inline = self-contained but larger file; File = modular but requires filesystem.
+    # Future enhancement: Support PROMPTS_DIR env var for file-based prompts.
     local compound_prompt
     read -r -d '' compound_prompt << COMPOUND_EOF || true
 You are a Knowledge Keeper - extracting and preserving learnings for future work.
