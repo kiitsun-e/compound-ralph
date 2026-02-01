@@ -101,6 +101,21 @@ cr spec plans/add-user-authentication-with-jwt.md
 # 7. Start autonomous implementation (AUTONOMOUS)
 cr implement
 # Walk away - Claude works through tasks one by one
+
+# 8. Review the implementation
+cr review
+# Multi-dimensional code review, creates todos for issues
+
+# 9. Extract learnings (COMPOUND PHASE)
+cr compound user-authentication
+# Captures patterns, decisions, pitfalls for future work
+# Every feature should make subsequent features easier
+```
+
+## The Full Workflow
+
+```
+CONVERSE → RESEARCH → PLAN → IMPLEMENT → REVIEW → COMPOUND
 ```
 
 ## Three Modes
@@ -110,6 +125,8 @@ cr implement
 | **Exploration** | Interactive | Converse about ideas, review research reports |
 | **Planning** | Interactive | Answer questions, refine scope, run /deepen-plan |
 | **Implementation** | Autonomous | Walk away, check back later |
+| **Review** | Interactive | Review findings, approve or request fixes |
+| **Compound** | Interactive | Review extracted learnings, add insights |
 
 ## Commands
 
@@ -210,6 +227,30 @@ cr status
 # user-auth               complete    12          8/8
 # payment-flow            pending     0           0/5
 ```
+
+### `cr compound [feature]`
+
+Extract and preserve learnings after implementation (Phase 6).
+
+- Captures patterns that worked well
+- Documents decisions and their reasoning
+- Identifies pitfalls to avoid in future work
+- Makes subsequent features easier by compounding knowledge
+
+```bash
+cr compound user-authentication     # Extract learnings from specific feature
+cr compound                         # Extract learnings from recent work
+```
+
+**Output:**
+- `knowledge/learnings/` - Specific lessons from the feature
+- `knowledge/patterns/` - Reusable patterns worth codifying
+
+**Hard questions this phase answers:**
+- "What did we learn that we'll forget in 3 months?"
+- "What decisions did we make that future us will question?"
+- "What patterns are emerging that should be codified?"
+- "What mistakes are we at risk of repeating?"
 
 ## Architecture
 
