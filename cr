@@ -3412,8 +3412,14 @@ cmd_implement() {
     local template_file="$CR_DIR/templates/PROMPT-template.md"
     if [[ -f "$prompt_file" ]] && [[ -f "$template_file" ]]; then
         local prompt_time template_time
-        prompt_time=$(stat -f %m "$prompt_file" 2>/dev/null || stat -c %Y "$prompt_file" 2>/dev/null || echo 0)
-        template_time=$(stat -f %m "$template_file" 2>/dev/null || stat -c %Y "$template_file" 2>/dev/null || echo 0)
+        # Linux uses -c %Y, macOS uses -f %m (stat -f on Linux returns filesystem info, not file mtime)
+        if [[ "$(uname)" == "Darwin" ]]; then
+            prompt_time=$(stat -f %m "$prompt_file" 2>/dev/null || echo 0)
+            template_time=$(stat -f %m "$template_file" 2>/dev/null || echo 0)
+        else
+            prompt_time=$(stat -c %Y "$prompt_file" 2>/dev/null || echo 0)
+            template_time=$(stat -c %Y "$template_file" 2>/dev/null || echo 0)
+        fi
 
         if [[ "$template_time" -gt "$prompt_time" ]]; then
             log_warn "PROMPT.md is older than the template and may be missing recent improvements"
