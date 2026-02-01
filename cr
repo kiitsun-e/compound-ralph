@@ -2320,6 +2320,9 @@ cmd_converse() {
     echo ""
 
     local converse_prompt
+    # Prompts embedded inline for portability (self-contained distribution).
+    # Trade-off: Inline = self-contained but larger file; File = modular but requires filesystem.
+    # See comments above cmd_compound() for details on the trade-off.
     read -r -d '' converse_prompt << CONVERSE_EOF || true
 You are a Conversationalist - a curious, thoughtful conversation partner.
 
@@ -2342,12 +2345,66 @@ HARD QUESTIONS TO ASK:
 - "Who else is affected that we haven't considered?"
 - "What would have to be true for this to be the wrong approach?"
 
-CONVERSATION STAGES:
-1. UNDERSTAND - What's the core problem? Who experiences it?
-2. ASSUMPTIONS - What are we assuming? What if we're wrong?
-3. ALTERNATIVES - What are 2-3 other approaches?
-4. TRADE-OFFS - What are we trading off with each approach?
-5. DECIDE - Do we have enough info? What's our decision?
+WHEN TO USE THIS CONVERSATION:
+- Starting a new feature or project
+- Facing a significant design decision
+- Assumptions need to be examined
+- Multiple valid approaches exist
+- Stakeholders have different perspectives
+
+CONVERSATION STAGES (guide through each - don't rush):
+
+### Stage 1: UNDERSTAND
+Goal: Understand the core problem or opportunity
+Ask:
+- What triggered this idea?
+- What problem are we trying to solve?
+- Who experiences this problem?
+- How do they currently work around it?
+**Move on when:** The problem is clearly articulated and stakeholders identified.
+
+### Stage 2: ASSUMPTIONS
+Goal: Surface and examine assumptions
+Ask:
+- What are we assuming to be true?
+- Which assumptions are we most uncertain about?
+- What happens if our key assumption is wrong?
+- What data would validate or invalidate these assumptions?
+**Move on when:** Key assumptions are explicit and their risks understood.
+
+### Stage 3: ALTERNATIVES
+Goal: Explore alternative approaches
+Ask:
+- What are 2-3 other ways we could solve this?
+- What would the simplest possible solution look like?
+- What would we do with unlimited resources? Minimal resources?
+- What would a competitor do? What would we advise a friend to do?
+**Move on when:** At least 2-3 alternatives have been genuinely explored.
+
+### Stage 4: TRADE-OFFS
+Goal: Understand trade-offs clearly
+Ask:
+- What are we trading off with each approach?
+- What's reversible and what's not?
+- What will we regret not considering?
+- What's the cost of delay vs the cost of being wrong?
+**Move on when:** Trade-offs are explicit and their implications understood.
+
+### Stage 5: DECIDE
+Goal: Reach a decision or identify blockers
+Ask:
+- Do we have enough information to decide?
+- What would change our mind?
+- What's our decision and why?
+- What do we need to research before deciding?
+**Move on when:** A decision is made OR specific research needs are identified.
+
+GUIDELINES:
+- Don't skip stages to reach a decision faster
+- It's okay if a conversation spans multiple sessions
+- Some conversations conclude with "we need to research X" - that's a valid outcome
+- Document decisions even if they seem obvious - future you will thank you
+- Revisit decisions when key assumptions change
 
 CONTEXT TO READ:${vision_context}${claude_md_context}${existing_decisions}${existing_research}
 
@@ -2485,6 +2542,9 @@ cmd_research() {
     echo ""
 
     local research_prompt
+    # Prompts embedded inline for portability (self-contained distribution).
+    # Trade-off: Inline = self-contained but larger file; File = modular but requires filesystem.
+    # See comments above cmd_compound() for details on the trade-off.
     read -r -d '' research_prompt << RESEARCH_EOF || true
 You are a Researcher - a thorough, evidence-based investigator.
 
@@ -2505,28 +2565,61 @@ HARD QUESTIONS TO INVESTIGATE:
 - "What's the maintenance burden of each option?"
 - "What security implications haven't been considered?"
 
+WHEN TO USE THIS RESEARCH:
+- Before planning a significant feature
+- Evaluating technical approaches
+- Assessing a new library or dependency
+- Understanding existing codebase patterns
+- Investigating security or performance concerns
+- After 'cr converse' identifies research needs
+
 RESEARCH METHODOLOGY:
 
 ### Phase 1: Codebase Analysis
+Goal: Understand what exists and how it works
+Tasks:
 - Find existing patterns related to the topic
 - Identify dependencies and their health (version, maintenance, vulnerabilities)
 - Map affected areas and components
 - Note technical constraints and conventions
 - Look for similar problems already solved in the codebase
 
+Tools to use:
+- Grep for pattern searching
+- Glob for file discovery
+- Read for understanding implementation details
+- Bash for dependency analysis (npm ls, cargo tree, pip list, etc.)
+
 ### Phase 2: External Research
+Goal: Learn from the broader ecosystem
+Tasks:
 - Search for best practices and common approaches
 - Look for common pitfalls and anti-patterns
 - Find similar implementations to learn from
 - Check for security advisories and concerns
 - Review official documentation
 
+Sources to check:
+- Official documentation
+- GitHub issues and discussions on relevant projects
+- Security advisories (CVE databases, npm audit, etc.)
+- Stack Overflow for common problems
+- Blog posts from respected practitioners
+
 ### Phase 3: Feasibility Assessment
+Goal: Determine if and how this can be done
+Tasks:
 - Estimate technical complexity (simple/moderate/complex)
 - Check dependency compatibility
 - Identify prerequisites needed
 - List risks and unknowns
 - Estimate scope of changes
+
+Questions to answer:
+- Can our current architecture support this?
+- What needs to change to make this work?
+- What are the blockers?
+- What's the minimum viable approach?
 
 CONFIDENCE LEVELS (always state these):
 - High: Multiple sources confirm, evidence is strong
@@ -2592,6 +2685,15 @@ Use this format:
 
 ## Sources
 - [Source with link] - [Brief description]
+
+GUIDELINES:
+- Prefer evidence over intuition
+- Always cite sources for external research
+- State confidence levels explicitly - don't hide uncertainty
+- It's okay to conclude "we need more information"
+- Update research reports as new information emerges
+- Link related research reports together
+- Time-box research to avoid analysis paralysis - set a scope before starting
 
 NEXT STEPS to suggest:
 - If ready to build: recommend 'cr plan <feature-description>'
@@ -4619,6 +4721,172 @@ cmd_spec_from_todos() {
 }
 
 #=============================================================================
+# COMPOUND COMMAND (Phase 6: Extract and preserve learnings)
+#=============================================================================
+
+cmd_compound() {
+    local feature="$*"
+
+    log_step "COMPOUND: Extract and Preserve Learnings"
+
+    # Ensure knowledge directory exists
+    mkdir -p "knowledge/learnings"
+    mkdir -p "knowledge/patterns"
+
+    # Find spec if feature name provided
+    local spec_dir=""
+    local spec_name=""
+    if [[ -n "$feature" ]]; then
+        # Try to find matching spec
+        spec_dir=$(find "$SPECS_DIR" -maxdepth 1 -type d -name "*$feature*" 2>/dev/null | head -1)
+        if [[ -n "$spec_dir" ]]; then
+            spec_name=$(basename "$spec_dir")
+            log_info "Found spec: $spec_name"
+        fi
+    fi
+
+    # Gather context
+    local existing_learnings=""
+    if [[ -d "knowledge/learnings" ]] && [[ -n "$(find knowledge/learnings -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]]; then
+        existing_learnings="$(printf '\n## Existing Learnings\nBuild on these:\n')$(find knowledge/learnings -maxdepth 1 -name '*.md' 2>/dev/null | while read -r f; do echo "- $f: $(head -1 "$f" | sed 's/^# //')"; done)"
+    fi
+
+    local spec_context=""
+    if [[ -n "$spec_dir" ]] && [[ -f "$spec_dir/SPEC.md" ]]; then
+        spec_context=$"\nRead $spec_dir/SPEC.md for implementation details and iteration log."
+    fi
+
+    echo ""
+    echo -e "${CYAN}Extracting learnings from: ${feature:-recent work}${NC}"
+    echo ""
+    echo "This phase captures what we learned for future work."
+    echo "Every feature should make subsequent features easier."
+    echo ""
+    echo "HARD QUESTIONS TO ANSWER:"
+    echo "  - What did we learn that we'll forget in 3 months?"
+    echo "  - What decisions did we make that future us will question?"
+    echo "  - What patterns are emerging that should be codified?"
+    echo "  - What mistakes are we at risk of repeating?"
+    echo ""
+    echo "Output: Learning documents in knowledge/learnings/"
+    echo ""
+    echo -e "${YELLOW}Starting Claude...${NC}"
+    echo ""
+
+    # Note: Prompts are embedded inline for portability (single-file distribution).
+    # Alternative approach: Extract to prompts/compound.txt and read with cat.
+    # Trade-off: Inline = self-contained but larger file; File = modular but requires filesystem.
+    # Future enhancement: Support PROMPTS_DIR env var for file-based prompts.
+    local compound_prompt
+    read -r -d '' compound_prompt << COMPOUND_EOF || true
+You are a Knowledge Keeper - extracting and preserving learnings for future work.
+
+FEATURE: ${feature:-recent implementation work}
+
+YOUR ROLE:
+You capture what was learned so future work is easier. You extract patterns,
+document decisions, and identify pitfalls to avoid. Every feature should
+compound - making subsequent features easier.
+
+HARD QUESTIONS TO ANSWER:
+- "What did we learn that we'll forget in 3 months?"
+- "What decisions did we make that future us will question?"
+- "What patterns are emerging that should be codified?"
+- "What mistakes are we at risk of repeating?"
+
+CONTEXT TO READ:${spec_context}
+- Review the SPEC.md iteration log for what happened
+- Check git log for recent changes
+- Look at any review todos that were addressed${existing_learnings}
+
+EXTRACT AND DOCUMENT:
+
+1. **Patterns** - Reusable approaches that worked well
+   Save to: knowledge/patterns/<pattern-name>.md
+
+2. **Learnings** - Specific lessons from this feature
+   Save to: knowledge/learnings/$(date '+%Y-%m-%d')-${feature:-learnings}.md
+
+3. **Decisions** - Update knowledge/decisions/ if any major decisions were made
+
+LEARNING DOCUMENT FORMAT:
+
+# Learning: [Title]
+
+## Context
+What were we building? What problem were we solving?
+
+## What We Learned
+- [Key insight 1]
+- [Key insight 2]
+
+## Patterns Worth Repeating
+- [Pattern that worked well]
+
+## Pitfalls to Avoid
+- [Mistake we made or almost made]
+
+## Recommendations for Future Work
+- [What should future implementers know?]
+
+## Related
+- [Links to related specs, decisions, or research]
+
+PATTERN DOCUMENT FORMAT:
+
+# Pattern: [Name]
+
+## Problem
+What situation does this pattern address?
+
+## Solution
+How do we solve it?
+
+## Example
+Show a concrete example from the codebase.
+
+## When to Use
+- [Situation 1]
+- [Situation 2]
+
+## When NOT to Use
+- [Anti-pattern situation]
+
+Begin extracting learnings now.
+COMPOUND_EOF
+
+    # Run Claude interactively
+    claude --dangerously-skip-permissions "$compound_prompt"
+
+    echo ""
+    log_success "Knowledge extraction complete!"
+    echo ""
+
+    # Check what was created
+    local new_learnings
+    new_learnings=$(find knowledge/learnings -maxdepth 1 -name "*.md" -mmin -5 2>/dev/null | wc -l)
+    local new_patterns
+    new_patterns=$(find knowledge/patterns -maxdepth 1 -name "*.md" -mmin -5 2>/dev/null | wc -l)
+
+    if [[ $new_learnings -gt 0 ]] || [[ $new_patterns -gt 0 ]]; then
+        log_success "Created $new_learnings learning(s) and $new_patterns pattern(s)"
+        echo ""
+        echo "Review your new knowledge:"
+        find knowledge/learnings -maxdepth 1 -name "*.md" -mmin -5 2>/dev/null | while read -r f; do echo "  - $f"; done
+        find knowledge/patterns -maxdepth 1 -name "*.md" -mmin -5 2>/dev/null | while read -r f; do echo "  - $f"; done
+    else
+        log_info "No new documents created. You can add learnings manually."
+    fi
+
+    echo ""
+    echo "This feature has compounded - future work will be easier."
+    echo ""
+    echo "The full workflow:"
+    echo "  CONVERSE → RESEARCH → PLAN → IMPLEMENT → REVIEW → COMPOUND ✓"
+    echo ""
+}
+
+#=============================================================================
 # DESIGN COMMAND
 #=============================================================================
 
@@ -5413,6 +5681,11 @@ COMMANDS:
         (no arg)        Fix all issues
                         Creates: specs/<feature>/fixes/[code|design]/
 
+    compound [feature]  Extract and preserve learnings (Phase 6)
+        (alias: comp)   Captures patterns, decisions, and pitfalls
+                        Makes future work easier by compounding knowledge
+                        Saves to: knowledge/learnings/, knowledge/patterns/
+
     design [url]        Proactive design improvement loop (SPA-aware)
         [--n N]         Force exactly N iterations (no early exit)
                         Default: exits early when design is polished
@@ -5545,6 +5818,9 @@ main() {
             ;;
         fix)
             cmd_fix "$@"
+            ;;
+        compound|comp)
+            cmd_compound "$@"
             ;;
         spec-from-todos)
             # Deprecated - show migration message
