@@ -5628,6 +5628,13 @@ cmd_reset_context() {
 #=============================================================================
 
 cmd_test_gen() {
+    # Validate claude CLI is available (required dependency)
+    if ! command -v claude &> /dev/null; then
+        log_error "Claude CLI not found. Install: npm install -g @anthropic-ai/claude-code"
+        log_error "See: https://docs.anthropic.com/claude-code"
+        exit 1
+    fi
+
     local spec_file=""
     local output_file=""
     local example_dir="test/specs"
@@ -5682,6 +5689,8 @@ cmd_test_gen() {
     fi
 
     # Handle --all flag (process directory)
+    # Note: --all currently only passes --dry-run to recursive calls.
+    # Custom --output or --example-tests are not propagated (uses defaults per spec).
     if [[ "$process_all" == true ]]; then
         if [[ ! -d "$spec_file" ]]; then
             log_error "With --all, argument must be a directory: $spec_file"
@@ -5705,6 +5714,8 @@ cmd_test_gen() {
     log_step "Generating E2E Tests from: $spec_file"
 
     # Derive output filename if not specified
+    # Assumption: spec files typically follow specs/<feature>/SPEC.md structure.
+    # For non-standard paths, use --output to specify explicitly.
     if [[ -z "$output_file" ]]; then
         # Extract feature name from path: specs/feature-name/SPEC.md -> feature-name
         local feature_name
@@ -5727,12 +5738,13 @@ cmd_test_gen() {
     local spec_content
     spec_content=$(cat "$spec_file")
 
-    # Gather example tests
+    # Gather example tests for pattern learning
+    # Limit to 2 examples to stay within context limits while providing pattern diversity
     local example_tests=""
     if [[ -d "$example_dir" ]]; then
         local example_count=0
         while IFS= read -r -d '' example_file; do
-            if [[ $example_count -lt 2 ]]; then  # Limit to 2 examples
+            if [[ $example_count -lt 2 ]]; then
                 example_tests+=$'\n\n--- Example: '"$example_file"$' ---\n'
                 example_tests+=$(cat "$example_file")
                 example_count=$((example_count + 1))
@@ -5807,6 +5819,9 @@ Include proper waits and assertions."
     generated_code=$(cat "$temp_output")
 
     # Strip any markdown code fences if Claude included them
+    # TODO: Markdown stripping is simple - only handles ```javascript, ```js, ``` patterns.
+    # If Claude uses unusual fence syntax (~~~, capital letters), this may not strip them.
+    # Current approach is sufficient for typical Claude output; add patterns if needed.
     generated_code=$(echo "$generated_code" | sed '/^```javascript$/d' | sed '/^```js$/d' | sed '/^```$/d')
 
     # Basic sanity check - code should not be empty
