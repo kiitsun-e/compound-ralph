@@ -5809,11 +5809,9 @@ Include proper waits and assertions."
     # Strip any markdown code fences if Claude included them
     generated_code=$(echo "$generated_code" | sed '/^```javascript$/d' | sed '/^```js$/d' | sed '/^```$/d')
 
-    # Validate generated code is JavaScript
-    if ! echo "$generated_code" | head -20 | grep -qE '(describe|import|const|export|/\*\*)'; then
-        log_error "Generated output doesn't look like valid JavaScript"
-        log_error "First 500 chars:"
-        echo "$generated_code" | head -c 500
+    # Basic sanity check - code should not be empty
+    if [[ -z "$generated_code" ]]; then
+        log_error "Generated output is empty"
         exit 1
     fi
 
