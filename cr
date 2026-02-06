@@ -5623,6 +5623,239 @@ cmd_reset_context() {
 # HELP COMMAND
 #=============================================================================
 
+#=============================================================================
+# TEST-GEN COMMAND (Generate E2E tests from feature specs)
+#=============================================================================
+
+cmd_test_gen() {
+    local spec_file=""
+    local output_file=""
+    local example_dir="test/specs"
+    local dry_run=false
+    local process_all=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -o|--output)
+                output_file="$2"
+                shift 2
+                ;;
+            --example-tests)
+                example_dir="$2"
+                shift 2
+                ;;
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            --all)
+                process_all=true
+                shift
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                echo "Usage: cr test-gen <spec-file> [--output <file>] [--dry-run]"
+                exit 1
+                ;;
+            *)
+                spec_file="$1"
+                shift
+                ;;
+        esac
+    done
+
+    # Validate input
+    if [[ -z "$spec_file" ]]; then
+        log_error "Usage: cr test-gen <spec-file> [options]"
+        log_error ""
+        log_error "Options:"
+        log_error "  -o, --output <file>    Output test file path"
+        log_error "  --example-tests <dir>  Directory with example tests (default: test/specs)"
+        log_error "  --dry-run              Show generated code without writing"
+        log_error "  --all                  Process all SPEC.md files in directory"
+        log_error ""
+        log_error "Examples:"
+        log_error "  cr test-gen specs/onboarding/SPEC.md"
+        log_error "  cr test-gen specs/settings/SPEC.md -o test/specs/settings.e2e.js"
+        exit 1
+    fi
+
+    # Handle --all flag (process directory)
+    if [[ "$process_all" == true ]]; then
+        if [[ ! -d "$spec_file" ]]; then
+            log_error "With --all, argument must be a directory: $spec_file"
+            exit 1
+        fi
+        
+        log_step "Processing all specs in $spec_file"
+        find "$spec_file" -name "SPEC.md" | while read -r spec; do
+            log_info "Processing: $spec"
+            cmd_test_gen "$spec" ${dry_run:+--dry-run}
+        done
+        return 0
+    fi
+
+    # Validate spec file exists
+    if [[ ! -f "$spec_file" ]]; then
+        log_error "Spec file not found: $spec_file"
+        exit 1
+    fi
+
+    log_step "Generating E2E Tests from: $spec_file"
+
+    # Derive output filename if not specified
+    if [[ -z "$output_file" ]]; then
+        # Extract feature name from path: specs/feature-name/SPEC.md -> feature-name
+        local feature_name
+        feature_name=$(dirname "$spec_file" | xargs basename)
+        output_file="test/specs/${feature_name}.e2e.js"
+        
+        # Handle case where spec is directly named (not in subdirectory)
+        if [[ "$feature_name" == "." ]] || [[ "$feature_name" == "specs" ]]; then
+            feature_name=$(basename "$spec_file" .md | tr '[:upper:]' '[:lower:]')
+            output_file="test/specs/${feature_name}.e2e.js"
+        fi
+    fi
+
+    log_info "Output: $output_file"
+
+    # Ensure output directory exists
+    mkdir -p "$(dirname "$output_file")"
+
+    # Gather context
+    local spec_content
+    spec_content=$(cat "$spec_file")
+
+    # Gather example tests
+    local example_tests=""
+    if [[ -d "$example_dir" ]]; then
+        local example_count=0
+        while IFS= read -r -d '' example_file; do
+            if [[ $example_count -lt 2 ]]; then  # Limit to 2 examples
+                example_tests+=$'\n\n--- Example: '"$example_file"$' ---\n'
+                example_tests+=$(cat "$example_file")
+                example_count=$((example_count + 1))
+            fi
+        done < <(find "$example_dir" -maxdepth 1 -name "*.e2e.js" -print0 2>/dev/null | head -z -n 2)
+    fi
+
+    if [[ -z "$example_tests" ]]; then
+        log_warn "No example tests found in $example_dir"
+        example_tests="No example tests available. Use standard WebdriverIO patterns."
+    fi
+
+    # Load wdio config summary
+    local wdio_config="WebdriverIO with tauri-driver. Mocha framework, BDD style. 60s timeout."
+    if [[ -f "wdio.conf.js" ]]; then
+        wdio_config+=$'\n'"$(grep -E 'timeout|port|framework' wdio.conf.js 2>/dev/null || true)"
+    fi
+
+    # Load test conventions
+    local test_conventions=""
+    local conventions_file="$CR_DIR/templates/TEST-conventions.md"
+    if [[ -f "$conventions_file" ]]; then
+        test_conventions=$(cat "$conventions_file")
+    else
+        test_conventions="Use standard WebdriverIO patterns. See wdio.dev documentation."
+    fi
+
+    # Build prompt from template
+    local prompt_template="$CR_DIR/prompts/test-gen.txt"
+    local prompt
+    
+    if [[ -f "$prompt_template" ]]; then
+        # Substitute variables in template
+        prompt=$(cat "$prompt_template")
+        prompt="${prompt//\$\{spec_content\}/$spec_content}"
+        prompt="${prompt//\$\{example_tests\}/$example_tests}"
+        prompt="${prompt//\$\{wdio_config\}/$wdio_config}"
+        prompt="${prompt//\$\{test_conventions\}/$test_conventions}"
+    else
+        # Inline fallback prompt
+        prompt="Generate WebdriverIO E2E tests for this spec:
+
+$spec_content
+
+Follow these example patterns:
+$example_tests
+
+Output ONLY JavaScript code, no markdown, no explanation.
+Use describe/it blocks with async/await.
+Include proper waits and assertions."
+    fi
+
+    echo ""
+    echo -e "${CYAN}Generating tests with Claude...${NC}"
+    echo ""
+
+    local temp_output
+    temp_output=$(mktemp)
+    trap "rm -f '$temp_output'" RETURN
+
+    # Call Claude to generate tests
+    echo "$prompt" | claude --dangerously-skip-permissions --print > "$temp_output" 2>&1
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        log_error "Claude failed with exit code $exit_code"
+        cat "$temp_output"
+        exit 1
+    fi
+
+    local generated_code
+    generated_code=$(cat "$temp_output")
+
+    # Strip any markdown code fences if Claude included them
+    generated_code=$(echo "$generated_code" | sed '/^```javascript$/d' | sed '/^```js$/d' | sed '/^```$/d')
+
+    # Validate generated code is JavaScript
+    if ! echo "$generated_code" | head -20 | grep -qE '(describe|import|const|export|/\*\*)'; then
+        log_error "Generated output doesn't look like valid JavaScript"
+        log_error "First 500 chars:"
+        echo "$generated_code" | head -c 500
+        exit 1
+    fi
+
+    if [[ "$dry_run" == true ]]; then
+        log_info "=== DRY RUN - Would write to: $output_file ==="
+        echo ""
+        echo "$generated_code"
+        echo ""
+        log_info "=== END DRY RUN ==="
+        return 0
+    fi
+
+    # Write the file
+    echo "$generated_code" > "$output_file"
+    log_success "Generated: $output_file"
+
+    # Syntax check
+    if command -v node &> /dev/null; then
+        if node --check "$output_file" 2>/dev/null; then
+            log_success "Syntax check passed"
+        else
+            log_warn "Syntax check failed - review generated code"
+            node --check "$output_file" 2>&1 | head -10
+        fi
+    fi
+
+    # Show summary
+    local line_count
+    line_count=$(wc -l < "$output_file")
+    local test_count
+    test_count=$(grep -c "it(" "$output_file" || echo "0")
+    
+    echo ""
+    log_info "Summary:"
+    echo "  Lines: $line_count"
+    echo "  Tests: $test_count it() blocks"
+    echo "  Output: $output_file"
+    echo ""
+    echo "Run tests with:"
+    echo "  npm test -- --spec $output_file"
+}
+
 cmd_help() {
     cat << HELP
 Compound Ralph - Autonomous Feature Implementation System
@@ -5680,6 +5913,14 @@ COMMANDS:
         [design]        Fix design review issues only
         (no arg)        Fix all issues
                         Creates: specs/<feature>/fixes/[code|design]/
+
+    test-gen <spec>     Generate E2E tests from feature spec
+        (alias: tg)     Reads SPEC.md, produces WebdriverIO test file
+                        Uses LLM to translate requirements → test code
+                        --output <file>  Specify output path
+                        --example-tests  Directory with example tests
+                        --dry-run        Show generated code only
+                        --all            Process all specs in directory
 
     compound [feature]  Extract and preserve learnings (Phase 6)
         (alias: comp)   Captures patterns, decisions, and pitfalls
@@ -5818,6 +6059,9 @@ main() {
             ;;
         fix)
             cmd_fix "$@"
+            ;;
+        test-gen|testgen|tg)
+            cmd_test_gen "$@"
             ;;
         compound|comp)
             cmd_compound "$@"
