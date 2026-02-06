@@ -5869,6 +5869,239 @@ Include proper waits and assertions."
     echo "  npm test -- --spec $output_file"
 }
 
+#=============================================================================
+# INIT-TESTS COMMAND (Set up WebdriverIO E2E testing infrastructure)
+#=============================================================================
+
+cmd_init_tests() {
+    local project_type="tauri"  # Currently only supports Tauri apps
+    local test_dir="test/e2e"
+    local force=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force|-f)
+                force=true
+                shift
+                ;;
+            --test-dir)
+                test_dir="$2"
+                shift 2
+                ;;
+            -*)
+                log_error "Unknown option: $1"
+                echo "Usage: cr init-tests [--force] [--test-dir <dir>]"
+                exit 1
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    log_step "Initializing E2E test infrastructure"
+
+    # Check if already initialized
+    if [[ -f "wdio.conf.js" ]] && [[ "$force" != true ]]; then
+        log_warn "wdio.conf.js already exists. Use --force to overwrite."
+        exit 1
+    fi
+
+    # Detect package manager
+    local pkg_manager="npm"
+    if [[ -f "pnpm-lock.yaml" ]]; then
+        pkg_manager="pnpm"
+    elif [[ -f "yarn.lock" ]]; then
+        pkg_manager="yarn"
+    fi
+    log_info "Detected package manager: $pkg_manager"
+
+    # Check for Tauri project
+    if [[ ! -d "src-tauri" ]]; then
+        log_warn "No src-tauri directory found. This command is designed for Tauri apps."
+        read -p "Continue anyway? [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    fi
+
+    # Detect binary name from Cargo.toml
+    local binary_name="app"
+    if [[ -f "src-tauri/Cargo.toml" ]]; then
+        binary_name=$(grep -E "^name\s*=" src-tauri/Cargo.toml | head -1 | sed 's/.*=\s*"\(.*\)"/\1/' | tr -d ' ')
+        log_info "Detected binary name: $binary_name"
+    fi
+
+    # Create test directory
+    mkdir -p "$test_dir"
+    log_success "Created $test_dir/"
+
+    # Create wdio.conf.js
+    cat > wdio.conf.js << 'WDIOCONF'
+import os from "os";
+import path from "path";
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
+
+let tauriDriver;
+let exit = false;
+
+export const config = {
+  host: "127.0.0.1",
+  port: 4444,
+  specs: ["./test/e2e/**/*.e2e.js"],
+  maxInstances: 1,
+  capabilities: [
+    {
+      maxInstances: 1,
+      "tauri:options": {
+        application: path.resolve(__dirname, "src-tauri/target/debug/BINARY_NAME"),
+      },
+    },
+  ],
+  reporters: ["spec"],
+  framework: "mocha",
+  mochaOpts: {
+    ui: "bdd",
+    timeout: 60000,
+  },
+
+  beforeSession: () => {
+    tauriDriver = spawn(
+      path.resolve(os.homedir(), ".cargo", "bin", "tauri-driver"),
+      [],
+      { stdio: [null, process.stdout, process.stderr] }
+    );
+
+    tauriDriver.on("error", (error) => {
+      console.error("tauri-driver error:", error);
+      process.exit(1);
+    });
+    tauriDriver.on("exit", (code) => {
+      if (!exit) {
+        console.error("tauri-driver exited with code:", code);
+        process.exit(1);
+      }
+    });
+  },
+
+  afterSession: () => {
+    exit = true;
+    tauriDriver?.kill();
+  },
+};
+
+function onShutdown(fn) {
+  const cleanup = () => { try { fn(); } finally { process.exit(); } };
+  ["exit", "SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"].forEach(sig => process.on(sig, cleanup));
+}
+onShutdown(() => { exit = true; tauriDriver?.kill(); });
+WDIOCONF
+
+    # Replace placeholder with actual binary name
+    sed -i "s/BINARY_NAME/$binary_name/g" wdio.conf.js
+    log_success "Created wdio.conf.js"
+
+    # Create smoke test
+    cat > "$test_dir/smoke.e2e.js" << 'SMOKETEST'
+/**
+ * Smoke test - verify E2E infrastructure works
+ */
+describe("Smoke Test", () => {
+  it("should launch the app", async () => {
+    const body = await $("body");
+    await body.waitForExist({ timeout: 10000 });
+    expect(await body.isExisting()).toBe(true);
+  });
+
+  it("should have content", async () => {
+    const text = await $("body").getText();
+    console.log("App content (first 200 chars):", text.slice(0, 200));
+    expect(text.length).toBeGreaterThan(0);
+  });
+});
+SMOKETEST
+    log_success "Created $test_dir/smoke.e2e.js"
+
+    # Create helper script
+    mkdir -p scripts
+    cat > scripts/run-e2e.sh << 'RUNSCRIPT'
+#!/bin/bash
+# Run E2E tests with WebdriverIO and tauri-driver
+set -e
+
+if [[ -z "$DISPLAY" ]]; then
+    echo "No DISPLAY set. Starting Xvfb..."
+    Xvfb :99 -screen 0 1280x1024x24 &
+    XVFB_PID=$!
+    export DISPLAY=:99
+    sleep 2
+    trap "kill $XVFB_PID 2>/dev/null" EXIT
+fi
+
+echo "Running E2E tests with DISPLAY=$DISPLAY"
+
+if ! command -v tauri-driver &> /dev/null; then
+    echo "Error: tauri-driver not found. Install: cargo install tauri-driver"
+    exit 1
+fi
+
+BINARY="src-tauri/target/debug/$(grep -oP 'application:.*debug/\K[^"]+' wdio.conf.js 2>/dev/null || echo 'app')"
+if [[ ! -f "$BINARY" ]]; then
+    echo "Warning: Binary not found at $BINARY"
+    echo "Build with: cd src-tauri && cargo build"
+fi
+
+npx wdio run wdio.conf.js "$@"
+RUNSCRIPT
+    chmod +x scripts/run-e2e.sh
+    log_success "Created scripts/run-e2e.sh"
+
+    # Install dependencies
+    log_step "Installing WebdriverIO dependencies..."
+    case "$pkg_manager" in
+        pnpm)
+            pnpm add -D @wdio/cli @wdio/local-runner @wdio/mocha-framework @wdio/spec-reporter 2>&1 | tail -5
+            ;;
+        yarn)
+            yarn add -D @wdio/cli @wdio/local-runner @wdio/mocha-framework @wdio/spec-reporter 2>&1 | tail -5
+            ;;
+        *)
+            npm install -D @wdio/cli @wdio/local-runner @wdio/mocha-framework @wdio/spec-reporter 2>&1 | tail -5
+            ;;
+    esac
+    log_success "Installed WebdriverIO dependencies"
+
+    # Add npm scripts to package.json
+    if command -v jq &> /dev/null && [[ -f "package.json" ]]; then
+        local tmp_pkg
+        tmp_pkg=$(mktemp)
+        jq '.scripts["test:e2e"] = "wdio run wdio.conf.js" | .scripts["test:e2e:headless"] = "DISPLAY=:99 wdio run wdio.conf.js"' package.json > "$tmp_pkg"
+        mv "$tmp_pkg" package.json
+        log_success "Added test:e2e scripts to package.json"
+    else
+        log_warn "Could not update package.json (jq not found). Add manually:"
+        echo '  "test:e2e": "wdio run wdio.conf.js"'
+    fi
+
+    echo ""
+    log_success "E2E test infrastructure initialized!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Build your app:        cd src-tauri && cargo build"
+    echo "  2. Start Xvfb (headless): Xvfb :99 -screen 0 1280x1024x24 &"
+    echo "  3. Run smoke test:        DISPLAY=:99 $pkg_manager test:e2e"
+    echo "  4. Generate tests:        cr test-gen specs/your-feature/SPEC.md"
+    echo ""
+    echo "Prerequisites:"
+    echo "  - tauri-driver: cargo install tauri-driver"
+    echo "  - webkit2gtk-driver: sudo apt install webkit2gtk-driver"
+}
+
 cmd_help() {
     cat << HELP
 Compound Ralph - Autonomous Feature Implementation System
@@ -5934,6 +6167,12 @@ COMMANDS:
                         --example-tests  Directory with example tests
                         --dry-run        Show generated code only
                         --all            Process all specs in directory
+
+    init-tests          Set up WebdriverIO E2E testing infrastructure
+        (alias: init-e2e)  Creates wdio.conf.js, test directory, smoke test
+                        Installs dependencies, adds npm scripts
+                        --force          Overwrite existing config
+                        --test-dir <dir> Custom test directory (default: test/e2e)
 
     compound [feature]  Extract and preserve learnings (Phase 6)
         (alias: comp)   Captures patterns, decisions, and pitfalls
@@ -6075,6 +6314,9 @@ main() {
             ;;
         test-gen|testgen|tg)
             cmd_test_gen "$@"
+            ;;
+        init-tests|init-e2e)
+            cmd_init_tests "$@"
             ;;
         compound|comp)
             cmd_compound "$@"
