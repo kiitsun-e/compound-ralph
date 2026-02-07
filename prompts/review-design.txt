@@ -1,0 +1,240 @@
+# Used by: cmd_review() - design review of UI pages and view states
+# Placeholders: __DESIGN_CONTEXT__, __DESIGN_URL__, __REVIEW_SESSION_DIR__,
+#   __DESIGN_TODOS_DIR__, __DESIGN_SPEC_TAG__
+__DESIGN_CONTEXT__
+
+TARGET URL: __DESIGN_URL__
+
+INSTRUCTIONS:
+
+## Step 1: Discover All Pages (URL-based)
+
+First, crawl the site to find all URL-based pages:
+
+```bash
+# Open the base URL
+agent-browser open __DESIGN_URL__
+
+# Get all navigation links (look for nav, header, footer links)
+agent-browser eval "Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a')).map(a => a.href).filter(h => h.startsWith(window.location.origin))"
+```
+
+Build a list of unique URL pages to review.
+
+## Step 2: Discover View States (SPA-aware)
+
+CRITICAL: Modern SPAs have multiple views/states at the SAME URL. You must discover these.
+
+For EACH page, after opening it, discover view states:
+
+```bash
+# Get interactive elements to find view switchers
+agent-browser snapshot -i
+```
+
+Look for these patterns in the snapshot output:
+
+1. **Tab groups / View switchers** - Elements with:
+   - role="tablist" or role="tab"
+   - Buttons/links labeled: View, Mode, Tab, Focus, Tree, Gallery, Compare, List, Grid, Stats
+   - Segmented controls or toggle button groups
+   - Sidebar navigation items that don't change URL
+
+2. **Keyboard shortcuts** - Check for:
+   - Number keys 1-9 often switch views
+   - Letters like G (gallery), T (tree), S (stats)
+   - Look for keyboard hint text or data-shortcut attributes
+   ```bash
+   # Try common view-switching shortcuts
+   agent-browser press 1
+   agent-browser snapshot -i  # Check if view changed
+   agent-browser press 2
+   agent-browser snapshot -i  # Check if view changed
+   # Continue for 3, 4, 5 if views keep changing
+   ```
+
+3. **Collapsible sidebars** - Look for:
+   - Toggle buttons for sidebars/panels
+   - Collapsed vs expanded states
+   - Left/right panel toggles
+
+4. **Sub-tabs within views** - Like:
+   - "Trees" vs "Favorites" tabs in a sidebar
+   - Filter modes or display options
+
+Build a complete list of view states for each page:
+```
+Page: /dashboard
+  - View: focus (default, or press 1)
+  - View: tree (press 2, or click Tree tab)
+  - View: compare (press 3)
+  - View: gallery (press 4)
+  - View: statistics (press 5)
+  - Sidebar: trees tab
+  - Sidebar: favorites tab
+  - Sidebar: collapsed state
+```
+
+## Step 3: Screenshot Each Page AND View State at Multiple Viewports
+
+SCREENSHOT DIRECTORY: __REVIEW_SESSION_DIR__/
+
+For EACH page, and for EACH view state on that page, screenshot at ALL viewport widths:
+
+```bash
+# Example: Dashboard with multiple view states
+agent-browser open [page-url]
+
+# === DEFAULT VIEW ===
+agent-browser resize 1920 1080
+agent-browser screenshot __REVIEW_SESSION_DIR__/[page-name]-default-1920.png
+agent-browser resize 1440 900
+agent-browser screenshot __REVIEW_SESSION_DIR__/[page-name]-default-1440.png
+agent-browser resize 1024 768
+agent-browser screenshot __REVIEW_SESSION_DIR__/[page-name]-default-1024.png
+agent-browser resize 375 812
+agent-browser screenshot __REVIEW_SESSION_DIR__/[page-name]-default-375.png
+
+# === EACH DISCOVERED VIEW STATE ===
+# Switch to next view (click tab or press shortcut)
+agent-browser press 2  # or: agent-browser click @e5
+agent-browser resize 1920 1080
+agent-browser screenshot __REVIEW_SESSION_DIR__/[page-name]-[view-name]-1920.png
+agent-browser resize 1440 900
+agent-browser screenshot __REVIEW_SESSION_DIR__/[page-name]-[view-name]-1440.png
+agent-browser resize 1024 768
+agent-browser screenshot __REVIEW_SESSION_DIR__/[page-name]-[view-name]-1024.png
+agent-browser resize 375 812
+agent-browser screenshot __REVIEW_SESSION_DIR__/[page-name]-[view-name]-375.png
+
+# Repeat for ALL view states discovered in Step 2
+```
+
+Naming convention for screenshots:
+- `landing-1920.png` - Simple page, no view states
+- `dashboard-focus-1920.png` - Dashboard in focus view
+- `dashboard-tree-1920.png` - Dashboard in tree view
+- `dashboard-gallery-1440.png` - Dashboard gallery at laptop size
+- `dashboard-sidebar-collapsed-1024.png` - Collapsed sidebar state
+
+IMPORTANT:
+- Screenshot ALL viewport sizes for EVERY view state
+- Don't skip views - each view may have unique responsive issues
+- Sidebar states often break differently than main content
+
+## Step 4: Load Design Skill
+
+Load the /frontend-design skill to apply its philosophy:
+Use: skill: frontend-design
+
+## Step 5: Review ALL Pages AND View States
+
+Apply the /frontend-design skill philosophy to critique EACH page AND EACH view state:
+
+   DISTINCTIVE vs GENERIC - Ask yourself:
+   - Does this look like every other AI-generated site? (Bad)
+   - Would a human designer be proud of this? (Good)
+   - Is there a clear point of view? (Good)
+   - Could this be any company's website? (Bad)
+
+   TYPOGRAPHY - Check for:
+   - Default system fonts vs intentional font choices
+   - Weak hierarchy (everything same size/weight)
+   - Poor line-height and letter-spacing
+   - Missing typographic rhythm
+
+   COLOR - Look for:
+   - Too much gray (the #1 sign of AI-generated design)
+   - Safe, boring palette with no personality
+   - Poor contrast or muddy colors
+   - No accent color or visual interest
+
+   SPACING & LAYOUT - Evaluate:
+   - Cramped or inconsistent spacing
+   - No visual rhythm or intentional whitespace
+   - Generic grid without personality
+   - Components feel disconnected
+
+   RESPONSIVE DESIGN - Check at ALL viewport sizes:
+   - Text compression or overflow at larger widths (1920px, 1440px)
+   - Layout breaks at specific breakpoints
+   - Elements that don't scale properly between sizes
+   - Content that becomes unreadable at mobile (375px)
+   - Max-width constraints that cause issues when maximized
+
+   COMPONENTS - Identify:
+   - Default/unstyled buttons, inputs, cards
+   - No hover states or micro-interactions
+   - Generic shadows and borders
+   - Missing polish and craft
+
+   PERSONALITY - Consider:
+   - Does the design have a point of view?
+   - Is there craft and attention to detail?
+   - Would this stand out or blend in?
+
+4. For each issue found, create a todo file in:
+   __DESIGN_TODOS_DIR__/
+
+   Name files like: 001-p2-bland-hero.md, 002-p2-weak-typography.md
+
+5. Use this format (note: include PAGE and VIEW STATE where issue was found):
+---
+priority: p2
+tags: [design, ui, frontend-design]
+spec: __DESIGN_SPEC_TAG__
+type: design
+page: [url of page where issue found]
+view: [view state if applicable, e.g., "tree", "gallery", "sidebar-collapsed"]
+---
+# [Issue Title]
+
+## Problem Statement
+[What's wrong - reference specific /frontend-design principles violated]
+
+## Findings
+- Page: `[full URL of the page]`
+- View State: `[view name, e.g., tree, gallery, focus]` (or "default" if no SPA views)
+- File: `path/to/component.tsx`
+- Screenshot: [reference screenshot filename, e.g., dashboard-tree-375.png]
+- Principle violated: [e.g., 'Generic color palette with too much gray']
+
+## Recommended Action
+[Specific design improvement following /frontend-design philosophy]
+[Include concrete suggestions: specific colors, font sizes, spacing values]
+
+## Acceptance Criteria
+- [ ] [Specific visual outcome that would satisfy /frontend-design standards]
+
+## Review Summary
+
+After reviewing ALL pages, ALL view states, at ALL viewport sizes, provide a summary:
+- Total URL pages reviewed: [N]
+- Total view states reviewed: [N] (e.g., dashboard has 5 views = 5 states)
+- Viewport sizes tested: 1920px, 1440px, 1024px, 375px
+- Total screenshots taken: [N]
+
+### Issues Found
+- Global issues (affect all pages/views): [list]
+- Page-specific issues: [list by page]
+- View-specific issues: [list by view state]
+- Responsive issues: [list any layout/scaling problems at specific viewports]
+
+### View State Coverage
+List all view states discovered and reviewed:
+| Page | View State | Screenshots |
+|------|------------|-------------|
+| /dashboard | focus | 4 viewports |
+| /dashboard | tree | 4 viewports |
+| etc. | | |
+
+IMPORTANT: Be opinionated. The /frontend-design skill demands distinctive, memorable design.
+Don't accept 'good enough' - push for design that has craft and personality.
+
+CRITICAL FOR SPAs:
+- Review EVERY view state, not just the default view
+- Each view (focus, tree, gallery, etc.) may have completely different layouts and issues
+- Sidebar states (collapsed, different tabs) often have unique responsive bugs
+- A thorough review of a complex SPA like a dashboard should have 20-50+ screenshots
+
+Screenshots are saved to: __REVIEW_SESSION_DIR__/
