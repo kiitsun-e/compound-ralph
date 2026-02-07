@@ -2,6 +2,13 @@
 
 How to invoke Compound Ralph programmatically from AI agents, CI/CD pipelines, and scripts.
 
+## Prerequisites
+
+- `jq` — Required for JSON parsing in shell script examples
+- POSIX-compatible shell (bash 4.0+ or zsh)
+- `cr` command in PATH ([Installation](../README.md#installation))
+- Claude Code CLI installed and authenticated
+
 ## Non-Interactive Mode
 
 By default, `cr` prompts for confirmation at certain steps (e.g., when a spec is already marked complete). The `--non-interactive` flag auto-confirms all prompts:
@@ -13,6 +20,8 @@ cr --non-interactive implement specs/my-feature
 This is required for any unattended execution where no human is available to respond.
 
 ## JSON Output
+
+> **Note:** `--json` and `--non-interactive` flags require Compound Ralph v0.2.0+.
 
 The `--json` flag produces machine-readable JSON instead of human-formatted text. It automatically implies `NO_COLOR` (no ANSI escape codes in output).
 
@@ -63,6 +72,7 @@ Emits a summary object when the implementation loop exits:
 Possible `status` values:
 - `"complete"` - All tasks and quality gates passed
 - `"max_iterations"` - Reached the iteration limit without completion
+- `"failed"` - Too many consecutive failures (API issues, network problems, rate limiting)
 
 ## Clean Log Parsing with NO_COLOR
 
@@ -132,6 +142,29 @@ if [ "$status" = "complete" ]; then
 elif [ "$status" = "max_iterations" ]; then
     echo "Hit iteration limit, may need more iterations"
 fi
+```
+
+#### Error Handling Example
+
+Handle different completion states in your automation:
+
+```bash
+# Handle different completion states
+result=$(cr --json implement specs/my-feature/ 2>&1)
+status=$(echo "$result" | jq -r '.status')
+
+case "$status" in
+    complete)
+        echo "Feature built successfully"
+        ;;
+    max_iterations)
+        echo "Hit iteration limit — consider splitting into smaller specs"
+        ;;
+    failed)
+        echo "Build failed after consecutive errors"
+        exit 1
+        ;;
+esac
 ```
 
 ### Detecting Completion via Exit Code
