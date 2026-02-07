@@ -3096,8 +3096,12 @@ Options:
     --non-interactive   Auto-confirm prompts (for CI/agent use)
 
 Environment:
-    MAX_ITERATIONS=50   Maximum loop iterations
-    ITERATION_DELAY=3   Seconds between iterations
+    MAX_ITERATIONS=50              Maximum loop iterations
+    ITERATION_DELAY=3              Seconds between iterations
+    MAX_RETRIES=3                  Retries per iteration on transient errors
+    RETRY_DELAY=5                  Initial retry delay in seconds, doubles each retry
+    ITERATION_TIMEOUT=600          Max seconds per iteration before timeout
+    MAX_CONSECUTIVE_FAILURES=3     Stop after N consecutive failures
 
 Examples:
     cr implement                        # Auto-find active spec
@@ -3586,6 +3590,9 @@ Options:
     --team                Use multi-agent team review
     --team-model MODEL    Model for team agents (default: same as main)
     --dry-run             Show review plan without executing
+
+Environment:
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1    Required for --team flag
 
 Examples:
     cr review                           # Code review, auto-find spec
@@ -5601,6 +5608,8 @@ USAGE:
     cr <command> [arguments]
 
 COMMANDS:
+    Use 'cr <command> --help' for detailed help on any command.
+
     init [path]         Initialize a project for Compound Ralph
                         Creates specs/, plans/, knowledge/, AGENTS.md
                         Auto-detects project type (bun, npm, rails, python, etc.)
