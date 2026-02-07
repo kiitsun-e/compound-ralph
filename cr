@@ -5769,58 +5769,23 @@ cmd_test_gen() {
     # Build prompt from template
     local prompt_template="$CR_DIR/prompts/test-gen.txt"
     local prompt
-    
-    if [[ -f "$prompt_template" ]]; then
-        # Substitute variables in template using temp files to avoid
-        # bash ${//} corruption on special characters (regex, backslashes, etc.)
-        local tmp_spec tmp_examples tmp_wdio tmp_conventions
-        tmp_spec=$(mktemp)
-        tmp_examples=$(mktemp)
-        tmp_wdio=$(mktemp)
-        tmp_conventions=$(mktemp)
-        printf '%s' "$spec_content" > "$tmp_spec"
-        printf '%s' "$example_tests" > "$tmp_examples"
-        printf '%s' "$wdio_config" > "$tmp_wdio"
-        printf '%s' "$test_conventions" > "$tmp_conventions"
 
-        prompt=$(awk '
-            function read_file(path,    line, content) {
-                content = ""
-                while ((getline line < path) > 0) {
-                    content = content (content == "" ? "" : "\n") line
-                }
-                close(path)
-                return content
-            }
-            BEGIN {
-                spec = read_file(ARGV[1]); delete ARGV[1]
-                examples = read_file(ARGV[2]); delete ARGV[2]
-                wdio = read_file(ARGV[3]); delete ARGV[3]
-                conventions = read_file(ARGV[4]); delete ARGV[4]
-            }
-            {
-                gsub(/\$\{spec_content\}/, spec)
-                gsub(/\$\{example_tests\}/, examples)
-                gsub(/\$\{wdio_config\}/, wdio)
-                gsub(/\$\{test_conventions\}/, conventions)
-                print
-            }
-        ' "$tmp_spec" "$tmp_examples" "$tmp_wdio" "$tmp_conventions" "$prompt_template")
-
-        rm -f "$tmp_spec" "$tmp_examples" "$tmp_wdio" "$tmp_conventions"
-    else
-        # Inline fallback prompt
-        prompt="Generate WebdriverIO E2E tests for this spec:
-
-$spec_content
-
-Follow these example patterns:
-$example_tests
-
-Output ONLY JavaScript code, no markdown, no explanation.
-Use describe/it blocks with async/await.
-Include proper waits and assertions."
+    if [[ ! -f "$prompt_template" ]]; then
+        log_error "Prompt template not found: $prompt_template"
+        log_error "Expected prompts/test-gen.txt to exist in CR_DIR"
+        exit 1
     fi
+
+    # Placeholders use __DOUBLE_UNDERSCORE__ convention (see prompts/ convention from PR #17)
+    # Using bash ${//} for substitution is sufficient with this placeholder style because:
+    # - __PLACEHOLDER__ pattern won't appear naturally in specs/code content
+    # - No external dependencies (awk) required
+    # - Handles special characters safely (backslashes, quotes, etc.)
+    prompt=$(cat "$prompt_template")
+    prompt="${prompt//__SPEC_CONTENT__/$spec_content}"
+    prompt="${prompt//__EXAMPLE_TESTS__/$example_tests}"
+    prompt="${prompt//__WDIO_CONFIG__/$wdio_config}"
+    prompt="${prompt//__TEST_CONVENTIONS__/$test_conventions}"
 
     echo ""
     echo -e "${CYAN}Generating tests with Claude...${NC}"
@@ -6031,8 +5996,7 @@ WDIOCONF
     # Escape characters that are special in sed replacement (/ & \)
     local escaped_binary_name
     escaped_binary_name=$(printf '%s' "$binary_name" | sed 's/[\/&\\]/\\&/g')
-    sed -i '' "s/BINARY_NAME/$escaped_binary_name/g" wdio.conf.js 2>/dev/null || \
-        sed -i "s/BINARY_NAME/$escaped_binary_name/g" wdio.conf.js
+    sed "s/BINARY_NAME/$escaped_binary_name/g" wdio.conf.js > wdio.conf.js.tmp && mv wdio.conf.js.tmp wdio.conf.js
     log_success "Created wdio.conf.js"
 
     # Create smoke test

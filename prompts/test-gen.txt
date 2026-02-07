@@ -3,16 +3,16 @@ You are a Test Generator - writing WebdriverIO E2E tests from feature specs.
 Your task: Transform the feature specification into complete, runnable WebdriverIO test code.
 
 SPEC FILE (source of truth for what to test):
-${spec_content}
+__SPEC_CONTENT__
 
 EXAMPLE TESTS (follow this exact format and patterns):
-${example_tests}
+__EXAMPLE_TESTS__
 
 WDIO CONFIGURATION SUMMARY:
-${wdio_config}
+__WDIO_CONFIG__
 
 TEST CONVENTIONS:
-${test_conventions}
+__TEST_CONVENTIONS__
 
 GENERATION RULES:
 
