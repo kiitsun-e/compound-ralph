@@ -2,18 +2,15 @@
 
 You are in a fully autonomous implementation loop. Each iteration has fresh context.
 Your state persists through these files (all in repo):
-- `SPEC.md` - Tasks, requirements, notes
+- `SPEC.md` - Tasks, requirements, notes (including accumulated context in the Notes section)
 - `.cr/project.json` - Discovered commands and config
-- `.cr/learnings.json` - Learnings from previous iterations
-- `.cr/context.yaml` - Accumulated context (learnings, error fixes, patterns)
+- `.cr/learnings.json` - Structured learnings from previous iterations
 - `git commits` - Code changes
 
 **This loop handles EVERYTHING:** empty repos, existing projects, any tech stack.
 You discover what exists, create what's missing, and verify it actually works.
 
-<!-- CONTEXT_START -->
-{{ACCUMULATED_CONTEXT}}
-<!-- CONTEXT_END -->
+<!-- Accumulated context lives in SPEC.md Notes section and .cr/learnings.json -->
 
 ---
 
