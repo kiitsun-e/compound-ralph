@@ -29,6 +29,16 @@ source ~/.zshrc
 ln -s ~/Desktop/coding-projects/compound-ralph/cr /usr/local/bin/cr
 ```
 
+### Shell Completions (optional)
+
+```bash
+# Bash - add to ~/.bashrc
+source ~/Desktop/coding-projects/compound-ralph/completions/cr.bash
+
+# Zsh - add to ~/.zshrc (before compinit)
+fpath=(~/Desktop/coding-projects/compound-ralph/completions $fpath)
+```
+
 ### Prerequisites
 
 1. **Git** - Version control (usually pre-installed)
