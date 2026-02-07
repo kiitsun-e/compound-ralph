@@ -2,6 +2,7 @@
 
 # Zsh completion for Compound Ralph (cr)
 # Add to fpath: fpath=(/path/to/compound-ralph/completions $fpath)
+# Requires: Zsh with modern completion system (compinit loaded)
 
 _cr() {
     local -a commands

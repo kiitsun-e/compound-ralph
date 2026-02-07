@@ -1,7 +1,13 @@
 # Bash completion for Compound Ralph (cr)
 # Source this file: source /path/to/compound-ralph/completions/cr.bash
+# Requires: Bash 4.0+ with programmable completion (compgen, complete -F)
+
+# Static completion for speed. If commands are added to cr, update this file manually.
+# Alternative: parse `cr help` dynamically (slower but always in sync).
 
 _cr_completion() {
+    # Bail out if compgen unavailable (very old bash)
+    command -v compgen &>/dev/null || return 0
     local cur prev commands aliases
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"

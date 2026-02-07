@@ -36,10 +36,10 @@ ln -s ~/Desktop/coding-projects/compound-ralph/cr /usr/local/bin/cr
 
 ```bash
 # Bash - add to ~/.bashrc
-source /path/to/compound-ralph/completions/cr.bash
+source ~/Desktop/coding-projects/compound-ralph/completions/cr.bash
 
 # Zsh - add to ~/.zshrc (before compinit)
-fpath=(/path/to/compound-ralph/completions $fpath)
+fpath=(~/Desktop/coding-projects/compound-ralph/completions $fpath)
 ```
 
 ### Prerequisites
