@@ -5628,13 +5628,6 @@ cmd_reset_context() {
 #=============================================================================
 
 cmd_test_gen() {
-    # Validate claude CLI is available (required dependency)
-    if ! command -v claude &> /dev/null; then
-        log_error "Claude CLI not found. Install: npm install -g @anthropic-ai/claude-code"
-        log_error "See: https://docs.anthropic.com/claude-code"
-        exit 1
-    fi
-
     local spec_file=""
     local output_file=""
     local example_dir="test/specs"
@@ -5744,12 +5737,13 @@ cmd_test_gen() {
     if [[ -d "$example_dir" ]]; then
         local example_count=0
         while IFS= read -r -d '' example_file; do
-            if [[ $example_count -lt 2 ]]; then
-                example_tests+=$'\n\n--- Example: '"$example_file"$' ---\n'
-                example_tests+=$(cat "$example_file")
-                example_count=$((example_count + 1))
+            example_tests+=$'\n\n--- Example: '"$example_file"$' ---\n'
+            example_tests+=$(cat "$example_file")
+            example_count=$((example_count + 1))
+            if [[ $example_count -ge 2 ]]; then
+                break
             fi
-        done < <(find "$example_dir" -maxdepth 1 -name "*.e2e.js" -print0 2>/dev/null | head -z -n 2)
+        done < <(find "$example_dir" -maxdepth 1 -name "*.e2e.js" -print0 2>/dev/null)
     fi
 
     if [[ -z "$example_tests" ]]; then
@@ -5777,12 +5771,43 @@ cmd_test_gen() {
     local prompt
     
     if [[ -f "$prompt_template" ]]; then
-        # Substitute variables in template
-        prompt=$(cat "$prompt_template")
-        prompt="${prompt//\$\{spec_content\}/$spec_content}"
-        prompt="${prompt//\$\{example_tests\}/$example_tests}"
-        prompt="${prompt//\$\{wdio_config\}/$wdio_config}"
-        prompt="${prompt//\$\{test_conventions\}/$test_conventions}"
+        # Substitute variables in template using temp files to avoid
+        # bash ${//} corruption on special characters (regex, backslashes, etc.)
+        local tmp_spec tmp_examples tmp_wdio tmp_conventions
+        tmp_spec=$(mktemp)
+        tmp_examples=$(mktemp)
+        tmp_wdio=$(mktemp)
+        tmp_conventions=$(mktemp)
+        printf '%s' "$spec_content" > "$tmp_spec"
+        printf '%s' "$example_tests" > "$tmp_examples"
+        printf '%s' "$wdio_config" > "$tmp_wdio"
+        printf '%s' "$test_conventions" > "$tmp_conventions"
+
+        prompt=$(awk '
+            function read_file(path,    line, content) {
+                content = ""
+                while ((getline line < path) > 0) {
+                    content = content (content == "" ? "" : "\n") line
+                }
+                close(path)
+                return content
+            }
+            BEGIN {
+                spec = read_file(ARGV[1]); delete ARGV[1]
+                examples = read_file(ARGV[2]); delete ARGV[2]
+                wdio = read_file(ARGV[3]); delete ARGV[3]
+                conventions = read_file(ARGV[4]); delete ARGV[4]
+            }
+            {
+                gsub(/\$\{spec_content\}/, spec)
+                gsub(/\$\{example_tests\}/, examples)
+                gsub(/\$\{wdio_config\}/, wdio)
+                gsub(/\$\{test_conventions\}/, conventions)
+                print
+            }
+        ' "$tmp_spec" "$tmp_examples" "$tmp_wdio" "$tmp_conventions" "$prompt_template")
+
+        rm -f "$tmp_spec" "$tmp_examples" "$tmp_wdio" "$tmp_conventions"
     else
         # Inline fallback prompt
         prompt="Generate WebdriverIO E2E tests for this spec:
@@ -6003,7 +6028,11 @@ onShutdown(() => { exit = true; tauriDriver?.kill(); });
 WDIOCONF
 
     # Replace placeholder with actual binary name
-    sed -i "s/BINARY_NAME/$binary_name/g" wdio.conf.js
+    # Escape characters that are special in sed replacement (/ & \)
+    local escaped_binary_name
+    escaped_binary_name=$(printf '%s' "$binary_name" | sed 's/[\/&\\]/\\&/g')
+    sed -i '' "s/BINARY_NAME/$escaped_binary_name/g" wdio.conf.js 2>/dev/null || \
+        sed -i "s/BINARY_NAME/$escaped_binary_name/g" wdio.conf.js
     log_success "Created wdio.conf.js"
 
     # Create smoke test
