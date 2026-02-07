@@ -3820,10 +3820,25 @@ cmd_review() {
     local spec_dir=""
     local review_type="code"  # code, design, or both
     local design_url=""
+    local use_team=false
+    local team_model=""
+    local dry_run=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --team)
+                use_team=true
+                shift
+                ;;
+            --team-model)
+                team_model="$2"
+                shift 2
+                ;;
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
             --design)
                 if [[ "$review_type" == "code" ]]; then
                     review_type="both"
@@ -4001,7 +4016,142 @@ type: code
 Run the review now."
         fi
 
-        echo "$code_review_prompt" | claude --dangerously-skip-permissions --print
+        if [[ "$use_team" == "true" ]]; then
+            # Agent Teams mode: spawn competing reviewers
+            
+            # Validate experimental feature is enabled
+            if [[ "${CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:-}" != "1" ]]; then
+                log_error "Agent Teams requires the experimental feature to be enabled."
+                log_error ""
+                log_error "Add to ~/.claude/settings.json:"
+                log_error '  { "env": { "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1" } }'
+                log_error ""
+                log_error "Or set the environment variable:"
+                log_error "  export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"
+                exit 1
+            fi
+
+            local team_model_arg=""
+            if [[ -n "$team_model" ]]; then
+                team_model_arg="Use $team_model for each teammate."
+            fi
+
+            # Dry-run mode: show team structure without running
+            if [[ "$dry_run" == "true" ]]; then
+                log_step "Agent Teams Review (dry-run)"
+                echo ""
+                echo "Would create agent team with 3 competing reviewers:"
+                echo ""
+                echo "  🔒 Security Reviewer"
+                echo "     Focus: auth, validation, injection, secrets"
+                echo ""
+                echo "  ⚡ Performance Reviewer"
+                echo "     Focus: complexity, memory, queries, bundle size"
+                echo ""
+                echo "  ✅ Quality Reviewer"
+                echo "     Focus: tests, error handling, maintainability"
+                echo ""
+                if [[ -n "$team_model" ]]; then
+                    echo "  Model: $team_model (for each teammate)"
+                else
+                    echo "  Model: default"
+                fi
+                echo ""
+                echo "  Spec: $spec_name"
+                echo "  Output: $code_todos_dir/"
+                echo ""
+                log_info "Run without --dry-run to execute"
+                return 0
+            fi
+
+            log_info "Using Agent Teams mode with competing reviewers"
+            log_warn "Note: This uses significantly more tokens than single-session review"
+            echo ""
+
+            local team_review_prompt="You are the lead of a code review agent team.
+
+SPEC: $spec_name
+SPEC FILE: $abs_spec_dir/SPEC.md
+TODOS OUTPUT DIRECTORY: $code_todos_dir/
+
+YOUR TASK: Create an agent team with 3 competing reviewers, each with a different focus. Have them review the code changes, challenge each other's findings, and produce comprehensive, non-overlapping todos.
+
+TEAM STRUCTURE:
+1. **Security Reviewer** - Focus on:
+   - Authentication/authorization issues
+   - Input validation and sanitization
+   - Data exposure risks
+   - Injection vulnerabilities
+   - Secrets handling
+
+2. **Performance Reviewer** - Focus on:
+   - Algorithmic complexity
+   - Memory leaks and resource management
+   - Unnecessary re-renders or computations
+   - Database query efficiency
+   - Bundle size impact
+
+3. **Quality Reviewer** - Focus on:
+   - Test coverage gaps
+   - Error handling completeness
+   - Code maintainability
+   - API contract adherence
+   - Documentation accuracy
+
+$team_model_arg
+
+INSTRUCTIONS:
+1. Create the agent team with these 3 reviewers
+2. Enable delegate mode (Shift+Tab) so you only coordinate, not implement
+3. Have each reviewer examine the code from their perspective
+4. Require plan approval before implementation to ensure reviewers understand scope
+5. After all reviewers complete, have them discuss findings - they should:
+   - Challenge each other's assessments
+   - Identify if issues overlap (deduplicate)
+   - Agree on priority (p1/p2/p3) for each issue
+6. Synthesize final findings into todo files
+
+TODO FILE FORMAT:
+Save to: $code_todos_dir/
+Naming: 001-p1-issue-name.md, 002-p2-issue-name.md, etc.
+
+Each file should contain:
+---
+priority: p1|p2|p3
+tags: [security|performance|quality|etc]
+spec: $spec_name
+type: code
+reviewer: [security|performance|quality]
+---
+# [Issue Title]
+
+## Problem Statement
+[What's wrong]
+
+## Findings
+- File: \`path/to/file.ts:line\`
+
+## Reviewer Notes
+[Which reviewer found this, any debate about severity]
+
+## Recommended Action
+[How to fix]
+
+## Acceptance Criteria
+- [ ] [Specific outcome]
+
+COMPLETION:
+After all todos are written, clean up the team and provide a summary:
+- Issues found per reviewer
+- Issues after deduplication
+- Priority breakdown (p1/p2/p3)
+
+Begin by creating the agent team now."
+
+            echo "$team_review_prompt" | claude --dangerously-skip-permissions --print
+        else
+            echo "$code_review_prompt" | claude --dangerously-skip-permissions --print
+        fi
         echo ""
     fi
 
@@ -5676,6 +5826,13 @@ COMMANDS:
         [--design]      Include design review (requires dev server)
         [--design-only] Only run design review (SPA-aware)
         [--url URL]     Specify dev server URL for design review
+        [--team]        Use Agent Teams for parallel review (experimental)
+                        Spawns 3 competing reviewers (security, performance,
+                        quality) that challenge each other's findings.
+                        Higher token cost, but more thorough.
+                        Requires CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+        [--team-model]  Model to use for teammates (e.g., sonnet)
+        [--dry-run]     Preview team structure without running (with --team)
                         Discovers pages via nav/footer + SPA view states
                         (tabs, keyboard shortcuts 1-5, sidebars, etc.)
                         Saves todos to: specs/<feature>/todos/code/
