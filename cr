@@ -1163,89 +1163,14 @@ get_learnings_summary() {
 # CONTEXT PRESERVATION (Learnings persist across fresh Claude instances)
 #=============================================================================
 
-CONTEXT_FILE=".cr/context.yaml"
-CONTEXT_MAX_LEARNINGS=50
-CONTEXT_MAX_ERRORS=20
-CONTEXT_MAX_PATTERNS=30
-
-# Initialize context file if it doesn't exist
-init_context() {
-    mkdir -p .cr
-    if [[ ! -f "$CONTEXT_FILE" ]]; then
-        cat > "$CONTEXT_FILE" << 'EOF'
-# Compound Ralph accumulated context
-# This file persists across iterations and fresh Claude instances
-
-learnings: []
-errors_fixed: []
-patterns_discovered: []
-EOF
-        log_info "Created context file: $CONTEXT_FILE"
-    fi
-}
-
-# Add a learning to context.yaml (optional - data already in learnings.json)
-# Usage: add_context_learning "learning text"
-add_context_learning() {
-    local learning="$1"
-
-    # Only write to context.yaml if yq is available
-    # Data is already stored in learnings.json via add_learning()
-    if command -v yq &>/dev/null; then
-        init_context
-        LEARNING="$learning" yq -i '.learnings += [env(LEARNING)]' "$CONTEXT_FILE" 2>/dev/null || true
-    fi
-}
-
-# Add an error fix to context.yaml (optional - data already in learnings.json)
-# Usage: add_context_error_fix "error pattern" "fix description"
-add_context_error_fix() {
-    local error="$1"
-    local fix="$2"
-
-    # Only write to context.yaml if yq is available
-    # Data is already stored in learnings.json via add_learning()
-    if command -v yq &>/dev/null; then
-        init_context
-        ERROR="$error" FIX="$fix" yq -i '.errors_fixed += [{"error": env(ERROR), "fix": env(FIX)}]' "$CONTEXT_FILE" 2>/dev/null || true
-    fi
-}
-
-# Add a discovered pattern to context.yaml (optional - data already in learnings.json)
-# Usage: add_context_pattern "pattern description"
-add_context_pattern() {
-    local pattern="$1"
-
-    # Only write to context.yaml if yq is available
-    # Data is already stored in learnings.json via add_learning()
-    if command -v yq &>/dev/null; then
-        init_context
-        PATTERN="$pattern" yq -i '.patterns_discovered += [env(PATTERN)]' "$CONTEXT_FILE" 2>/dev/null || true
-    fi
-}
-
-# Prune context to keep it bounded
-prune_context() {
-    [[ ! -f "$CONTEXT_FILE" ]] && return
-
-    if command -v yq &>/dev/null; then
-        # Keep only most recent entries
-        yq -i ".learnings = .learnings | .[-$CONTEXT_MAX_LEARNINGS:]" "$CONTEXT_FILE" 2>/dev/null || true
-        yq -i ".errors_fixed = .errors_fixed | .[-$CONTEXT_MAX_ERRORS:]" "$CONTEXT_FILE" 2>/dev/null || true
-        yq -i ".patterns_discovered = .patterns_discovered | .[-$CONTEXT_MAX_PATTERNS:]" "$CONTEXT_FILE" 2>/dev/null || true
-    fi
-}
-
 # Get context for injection into prompts
-# Returns formatted context string
-# Reads from learnings.json (using jq) with fallback to context.yaml (using yq)
+# Returns formatted context string from learnings.json
 get_context_for_prompt() {
     local learnings=""
     local errors=""
     local patterns=""
     local learnings_file=".cr/learnings.json"
 
-    # Prefer learnings.json (uses jq which is more common)
     if [[ -f "$learnings_file" ]] && command -v jq &>/dev/null; then
         # Get discovery/success learnings
         learnings=$(jq -r '.learnings // [] | map(select(.category == "discovery" or .category == "success")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
@@ -1253,11 +1178,6 @@ get_context_for_prompt() {
         errors=$(jq -r '.learnings // [] | map(select(.category == "fix")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
         # Get pattern learnings
         patterns=$(jq -r '.learnings // [] | map(select(.category == "pattern")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
-    # Fallback to context.yaml if yq is available
-    elif [[ -f "$CONTEXT_FILE" ]] && command -v yq &>/dev/null; then
-        learnings=$(yq -r '.learnings // [] | map("- " + .) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
-        errors=$(yq -r '.errors_fixed // [] | map("- " + .error + " → Fix: " + .fix) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
-        patterns=$(yq -r '.patterns_discovered // [] | map("- " + .) | join("\n")' "$CONTEXT_FILE" 2>/dev/null || echo "")
     fi
 
     cat << EOF
@@ -1304,7 +1224,6 @@ parse_iteration_output() {
         learning=$(extract_marker_value "$line" "LEARNING")
         if [[ -n "$learning" ]]; then
             add_learning "discovery" "$learning" "" "$spec_name" "$iteration"
-            add_context_learning "$learning"
             log_info "Captured learning: $learning"
         fi
     done < <(grep -oE "(\*\*)?LEARNING:(\*\*)? .+" "$log_file" 2>/dev/null || true)
@@ -1315,7 +1234,6 @@ parse_iteration_output() {
         local pattern
         pattern=$(extract_marker_value "$line" "PATTERN")
         if [[ -n "$pattern" ]]; then
-            add_context_pattern "$pattern"
             add_learning "pattern" "Pattern: $pattern" "" "$spec_name" "$iteration"
             log_info "Captured pattern: $pattern"
         fi
@@ -1331,7 +1249,6 @@ parse_iteration_output() {
             if [[ "$fixed" == *"→"* ]]; then
                 local error_part="${fixed%% →*}"
                 local fix_part="${fixed#*→ }"
-                add_context_error_fix "$error_part" "$fix_part"
                 add_learning "fix" "Fixed: $fixed" "" "$spec_name" "$iteration"
                 log_info "Captured fix: $error_part → $fix_part"
             fi
@@ -1441,32 +1358,6 @@ generate_iteration_summary() {
     fi
 
     echo "$summary"
-}
-
-# Find similar error fixes from context.yaml
-# Usage: find_similar_error_fixes "$error_message"
-find_similar_error_fixes() {
-    local error="$1"
-
-    [[ ! -f "$CONTEXT_FILE" ]] && return 0
-    [[ -z "$error" ]] && return 0
-
-    # Extract key terms from error (first 5 significant words)
-    local key_terms
-    key_terms=$(echo "$error" | tr -cs '[:alnum:]' '\n' | grep -v '^$' | head -5 | tr '\n' '|' | sed 's/|$//')
-
-    [[ -z "$key_terms" ]] && return 0
-
-    local matches=""
-    if command -v yq &>/dev/null; then
-        # Search errors_fixed for matches
-        matches=$(yq -r ".errors_fixed // [] | .[] | select(.error | test(\"(?i)($key_terms)\")) | \"- \" + .error + \" → Fix: \" + .fix" "$CONTEXT_FILE" 2>/dev/null || echo "")
-    fi
-
-    if [[ -n "$matches" ]]; then
-        echo "YOU'VE FIXED SIMILAR ERRORS BEFORE:
-$matches"
-    fi
 }
 
 # Find similar fixes in learnings.json
@@ -1623,20 +1514,6 @@ Please:
 EOF
 
     log_info "Added self-healing context to prompt"
-}
-
-# Record a successful fix for future learning
-record_successful_fix() {
-    local error="$1"
-    local fix_description="$2"
-
-    # Add to context.yaml for cross-session learning
-    add_context_error_fix "$error" "$fix_description"
-
-    # Also add to learnings.json for current session
-    add_learning "fix" "Fixed: $error → $fix_description" "" "" ""
-
-    log_success "Learned fix: $error → $fix_description"
 }
 
 # Record a blocked iteration
@@ -2370,10 +2247,6 @@ cmd_init() {
         cp -n "$CR_DIR/templates/SPEC-template.md" "$project_path/$SPECS_DIR/" 2>/dev/null || true
         log_success "Copied SPEC template to specs/"
     fi
-
-    # Initialize context file for cross-session learning
-    (cd "$project_path" && init_context)
-    log_success "Initialized .cr/context.yaml for context preservation"
 
     # Discover project configuration
     (cd "$project_path" && discover_project)
@@ -3285,10 +3158,6 @@ cmd_implement() {
     # Update status to building
     sed -i '' 's/status: pending/status: building/' "$spec_file" 2>/dev/null || true
 
-    # Initialize and prune context to keep it bounded
-    init_context
-    prune_context
-
     # Check if PROMPT.md is outdated compared to template
     local prompt_file="$spec_dir/PROMPT.md"
     local template_file="$CR_DIR/templates/PROMPT-template.md"
@@ -3315,7 +3184,7 @@ cmd_implement() {
     echo "Spec:           $spec_file"
     echo "Max iterations: $MAX_ITERATIONS"
     echo "Delay:          ${ITERATION_DELAY}s between iterations"
-    echo "Context:        $CONTEXT_FILE"
+    echo "Learnings:      .cr/learnings.json"
     echo ""
     echo "Press Ctrl+C to stop at any time."
     echo ""
@@ -3389,10 +3258,7 @@ cmd_implement() {
         if [[ -n "${PENDING_ISSUES:-}" ]]; then
             # Look for similar errors we've fixed before
             local similar_fixes=""
-            similar_fixes=$(find_similar_error_fixes "${PENDING_ISSUES}" 2>/dev/null || true)
-            if [[ -z "$similar_fixes" ]]; then
-                similar_fixes=$(find_similar_fixes_in_learnings "${PENDING_ISSUES}" 2>/dev/null || true)
-            fi
+            similar_fixes=$(find_similar_fixes_in_learnings "${PENDING_ISSUES}" 2>/dev/null || true)
 
             issues_context="
 ISSUES FROM PREVIOUS ITERATION (fix these first!):
@@ -3419,9 +3285,9 @@ $recent_learnings"
             fi
         fi
 
-        # Get accumulated context from context.yaml (persists across sessions)
+        # Get accumulated context from learnings.json (persists across sessions)
         local accumulated_context=""
-        if [[ -f "$CONTEXT_FILE" ]]; then
+        if [[ -f ".cr/learnings.json" ]]; then
             accumulated_context=$(get_context_for_prompt 2>/dev/null || true)
             if [[ -n "$accumulated_context" ]]; then
                 accumulated_context="
@@ -5490,15 +5356,6 @@ cmd_reset_context() {
             )]
         ' "$learnings_file" > "$learnings_file.tmp" && mv "$learnings_file.tmp" "$learnings_file"
         log_info "Cleaned harmful learnings from .cr/learnings.json"
-    fi
-
-    # Also reset context.yaml if it exists
-    if [[ -f "$CONTEXT_FILE" ]] && command -v yq &>/dev/null; then
-        # Filter out harmful patterns
-        yq -i '.learnings = [.learnings[] | select(. | test("pre-existing|skip|ignore|dismiss"; "i") | not)]' "$CONTEXT_FILE" 2>/dev/null || true
-        yq -i '.errors_fixed = [.errors_fixed[] | select(.fix | test("skip|ignore|dismiss"; "i") | not)]' "$CONTEXT_FILE" 2>/dev/null || true
-        yq -i '.patterns_discovered = [.patterns_discovered[] | select(. | test("pre-existing|skip|ignore|dismiss"; "i") | not)]' "$CONTEXT_FILE" 2>/dev/null || true
-        log_info "Cleaned harmful patterns from .cr/context.yaml"
     fi
 
     log_success "Context reset complete"
