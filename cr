@@ -2934,7 +2934,13 @@ If the project directory is empty/minimal AND the plan mentions technologies:
 | \"ruff\" | \\\`ruff check .\\\` |
 | \"mypy\" | \\\`mypy .\\\` |
 | \"go\", \"golang\" | \\\`go test ./...\\\`, \\\`go vet ./...\\\` |
-| \"rust\", \"cargo\" | \\\`cargo test\\\`, \\\`cargo clippy\\\` |
+| \"rust\", \"cargo\" | \\\`cargo test\\\`, \\\`cargo clippy\\\`, \\\`cargo check\\\` |
+| \"tauri\" (mixed) | Rust: \\\`cargo test\\\`, \\\`cargo clippy\\\` + Frontend: \\\`pnpm test\\\`, \\\`pnpm lint\\\` |
+
+### Environment Notes
+- **Rust projects:** Cargo may not be in PATH by default. Task 1 MUST include: \\\`source \"\$HOME/.cargo/env\"\\\`
+- **Mixed projects (e.g., Tauri):** Quality gates MUST cover ALL stacks, not just one
+- **Per-Task Gates:** MUST use concrete commands, never placeholders like \\\`[file]\\\` or \\\`[module]\\\`
 
 For greenfield projects, add this comment above Full Gates:
 \\\`<!-- PROVISIONAL: Inferred from plan. Task 1 MUST verify these work. -->\\\`

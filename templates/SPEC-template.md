@@ -4,7 +4,7 @@ status: pending  # pending | building | complete | blocked
 created: YYYY-MM-DD
 plan_file: plans/feature-name.md
 iteration_count: 0
-project_type: bun
+project_type: auto  # auto-detected: bun | node | rust | python | ruby | go | mixed
 ---
 
 # Feature: [Feature Name]
@@ -34,21 +34,22 @@ TASK ORDERING RULES (ENFORCED):
 ### Pending
 
 #### Phase 1: Setup (MUST COMPLETE BEFORE IMPLEMENTATION)
-- [ ] Task 1: Install dependencies and verify all quality gates run
-  - Run: `bun install`
-  - Verify: `bun test`, `bun lint`, `bun typecheck` all execute (even if they fail)
+- [ ] Task 1: Install dependencies, source environments, and verify all quality gates run
+  - Environment: Source any needed toolchains (e.g., `source "$HOME/.cargo/env"` for Rust)
+  - Install: Use the project's package manager (bun/npm/cargo/pip/bundle/go mod)
+  - Verify: Run each quality gate command from the section below — they must all EXECUTE (even if they fail)
   - **Blocker if skipped**: Cannot run backpressure without dependencies
 
 #### Phase 2: Implementation (Each task includes its own validation)
 - [ ] Task 2: [Create source file]
-  - File: `src/path/to/file.ts`
-  - Test: `tests/unit/file.test.ts` (CREATE IN SAME ITERATION)
-  - Validate: `bun lint src/path/to/file.ts && bun typecheck`
+  - File: `src/path/to/file.ext`
+  - Test: `tests/unit/file.test.ext` (CREATE IN SAME ITERATION)
+  - Validate: Run per-task quality gates on changed files
 
 - [ ] Task 3: [Create UI component]
-  - File: `src/components/Component.svelte`
-  - Test: `tests/unit/Component.test.ts` (CREATE IN SAME ITERATION)
-  - Validate: `bun lint && bun typecheck`
+  - File: `src/components/Component.ext`
+  - Test: `tests/unit/Component.test.ext` (CREATE IN SAME ITERATION)
+  - Validate: Run per-task quality gates on changed files
   - Visual: `agent-browser screenshot localhost:PORT/path` (REQUIRED FOR UI)
 
 #### Phase 3: Integration (After all implementation tasks)
@@ -83,15 +84,38 @@ BACKPRESSURE RULES (ENFORCED):
 -->
 
 ### Per-Task Gates (run after each task)
-- [ ] Lint passes on changed files: `bun lint [changed-files]`
-- [ ] Types check on changed files: `bun typecheck`
-- [ ] Related tests pass: `bun test [related-test-files]`
+<!--
+IMPORTANT: Replace these with CONCRETE commands for your project stack.
+Do NOT leave placeholders like [file] or [module] — use actual commands.
+The `cr spec` command should populate these based on detected project type.
+
+Examples by stack:
+  Node/Bun:    bun lint src/path/to/file.ts && bun typecheck
+  Rust:        cargo clippy -p crate-name && cargo test -p crate-name
+  Python:      ruff check path/to/file.py && pytest tests/test_file.py
+  Go:          go vet ./pkg/... && go test ./pkg/...
+  Mixed:       Run gates for EACH stack (e.g., cargo check && pnpm lint)
+-->
+- [ ] Lint passes on changed files: `<stack-specific lint command>`
+- [ ] Types/compilation check: `<stack-specific type check command>`
+- [ ] Related tests pass: `<stack-specific test command for changed module>`
 
 ### Full Gates (run after each iteration)
-- [ ] All tests pass: `bun test`
-- [ ] Full lint clean: `bun lint`
-- [ ] Full type check: `bun typecheck`
-- [ ] Build succeeds: `bun build`
+<!--
+These MUST be concrete, runnable commands — never placeholders.
+For multi-stack projects (e.g., Tauri = Rust + TypeScript), include gates for ALL stacks.
+
+Examples by stack:
+  Node/Bun:    bun test / bun lint / bun typecheck / bun build
+  Rust:        cargo test / cargo clippy / cargo check / cargo build
+  Python:      pytest / ruff check . / mypy . / python -m build
+  Go:          go test ./... / go vet ./... / go build ./...
+  Tauri:       cargo test && pnpm test / cargo clippy && pnpm lint / cargo build && pnpm build
+-->
+- [ ] All tests pass: `<discovered command>`
+- [ ] Full lint clean: `<discovered command>`
+- [ ] Full type/compilation check: `<discovered command>`
+- [ ] Build succeeds: `<discovered command>`
 
 ### Visual Gates (run after UI changes)
 - [ ] Screenshot captured: `agent-browser screenshot [url]`
@@ -116,17 +140,16 @@ BACKPRESSURE RULES (ENFORCED):
 
 | Source File | Test File | Visual Check |
 |-------------|-----------|--------------|
-| `src/components/Feature.tsx` | `tests/unit/Feature.test.ts` | Yes - screenshot |
-| `src/hooks/useFeature.ts` | `tests/unit/useFeature.test.ts` | No |
-| `src/utils/helper.ts` | `tests/unit/helper.test.ts` | No |
+| `src/path/to/module.ext` | `tests/path/to/module.test.ext` | No |
+| `src/components/Feature.ext` | `tests/unit/Feature.test.ext` | Yes - screenshot |
 
 ### Patterns to Follow
 
 [From plan research - existing patterns in the codebase to match]
 
-- Follow existing component structure in `src/components/Example.tsx`
-- Use the data fetching pattern from `src/hooks/useData.ts`
-- Match test style in `tests/unit/example.test.ts`
+- Follow existing code structure and conventions in the project
+- Match the test style used in existing test files
+- Use established patterns for the project's stack
 
 ### Notes
 

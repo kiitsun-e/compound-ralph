@@ -53,6 +53,9 @@ Read SPEC.md completely. Extract:
 Check what's already in the repo:
 
 ```bash
+# Environment setup (tools that need sourcing)
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"  # Rust/Cargo
+
 # Project type detection
 ls -la package.json Gemfile requirements.txt pyproject.toml go.mod Cargo.toml 2>/dev/null
 
@@ -92,6 +95,12 @@ Compare SPEC requirements to reality:
 Detect and install based on what exists:
 
 ```bash
+# Rust projects — source cargo environment FIRST
+# Check root first, then search subdirs (e.g., src-tauri/, backend/rust/)
+[ -f "Cargo.toml" ] || find . -name "Cargo.toml" -maxdepth 3 -quit 2>/dev/null | grep -q . && {
+    [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+}
+
 # Node/Bun projects
 [ -f "package.json" ] && ([ -f "bun.lockb" ] && bun install || npm install)
 
@@ -104,6 +113,15 @@ Detect and install based on what exists:
 
 # Go projects
 [ -f "go.mod" ] && go mod download
+
+# Rust projects — verify dependencies compile (cargo check is faster than full build)
+[ -f "Cargo.toml" ] && cargo check 2>/dev/null || {
+    # Check subdirectories for Cargo.toml (maxdepth 3 covers common layouts:
+    # ./Cargo.toml, ./src-tauri/Cargo.toml, ./backend/rust/Cargo.toml)
+    find . -name "Cargo.toml" -maxdepth 3 -not -path "*/target/*" -exec dirname {} \; | while IFS= read -r cargo_dir; do
+        (cd "$cargo_dir" && cargo check)
+    done
+}
 ```
 
 **IF NO PACKAGE MANAGER EXISTS** and SPEC requires one:
