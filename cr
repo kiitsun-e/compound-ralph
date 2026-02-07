@@ -1221,7 +1221,7 @@ add_learning() {
         escaped_learning=$(printf '%s' "$learning" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
         escaped_spec=$(printf '%s' "$spec" | sed 's/\\/\\\\/g; s/"/\\"/g')
         local entry="{\"date\":\"$(date -Iseconds)\",\"spec\":\"$escaped_spec\",\"iteration\":$iteration,\"category\":\"$category\",\"learning\":\"$escaped_learning\",\"files\":[]}"
-        sed_inplace 's/\]}/,'"$entry"']}/' "$learnings_file"
+        sed_inplace 's/\]}/,'"$entry"']}/' "$learnings_file" 2>/dev/null
     fi
 }
 
@@ -3055,7 +3055,7 @@ cmd_implement() {
     fi
 
     # Update status to building
-    sed_inplace 's/status: pending/status: building/' "$spec_file"
+    sed_inplace 's/status: pending/status: building/' "$spec_file" 2>/dev/null || true
 
     # Check if PROMPT.md is outdated compared to template
     local prompt_file="$spec_dir/PROMPT.md"
