@@ -1,0 +1,208 @@
+# Used by: cmd_spec() - converts a plan document into SPEC.md format
+# Placeholders: __ABS_PLAN_FILE__, __PROJECT_TYPE__, __IS_GREENFIELD__,
+#   __ABS_SPEC_DIR__, __FEATURE_NAME__, __PLAN_FILE__, __DATE__
+You are converting a plan document into a SPEC.md file for autonomous implementation.
+
+READ the plan file: __ABS_PLAN_FILE__
+
+Also examine the current project directory for existing config files:
+- package.json, tsconfig.json, eslint.config.*, vite.config.*, astro.config.*
+- Gemfile, .rubocop.yml
+- pyproject.toml, pytest.ini, ruff.toml
+- go.mod, Cargo.toml
+- Any other relevant config files
+
+Project info: type=__PROJECT_TYPE__, greenfield=__IS_GREENFIELD__
+
+Then CREATE the file: __ABS_SPEC_DIR__/SPEC.md
+
+---
+
+## QUALITY GATE DISCOVERY (CRITICAL - DO NOT SKIP)
+
+You MUST populate the Quality Gates section. Follow this priority order:
+
+### Priority 1: Extract from Plan
+If the plan has a "Quality Gates" or "### Quality Gates" section:
+- Copy those commands EXACTLY as written
+- They are authoritative
+
+### Priority 2: Discover from Project Files
+If the project has existing config files (package.json, Gemfile, pyproject.toml, etc.):
+- Read the files to find available scripts/commands
+- For package.json: check scripts.test, scripts.lint, scripts.typecheck, scripts.build, scripts.check
+- For Gemfile: look for test gems (rspec, minitest), linters (rubocop), type checkers (sorbet)
+- For pyproject.toml: look for pytest, ruff, mypy, black configurations
+- Generate gates for commands that ACTUALLY EXIST in the config
+
+### Priority 3: Infer from Plan Text (Greenfield Projects)
+If the project directory is empty/minimal AND the plan mentions technologies:
+
+| Plan Mentions | Inferred Quality Gates |
+|---------------|------------------------|
+| "astro" | \`bunx astro check\`, \`bunx astro build\` |
+| "next", "nextjs" | \`next lint\`, \`next build\` |
+| "vite" | \`vite build\` |
+| "vitest" | \`vitest run\` |
+| "jest" | \`jest\` or \`npm test\` |
+| "typescript", "tsx" | \`tsc --noEmit\` or \`bunx tsc --noEmit\` |
+| "eslint" | \`eslint .\` |
+| "prettier" | \`prettier --check .\` |
+| "rails", "ruby on rails" | \`bin/rails test\`, \`bundle exec rubocop\` |
+| "rspec" | \`bundle exec rspec\` |
+| "python", "fastapi", "django", "flask" | \`pytest\` |
+| "ruff" | \`ruff check .\` |
+| "mypy" | \`mypy .\` |
+| "go", "golang" | \`go test ./...\`, \`go vet ./...\` |
+| "rust", "cargo" | \`cargo test\`, \`cargo clippy\`, \`cargo check\` |
+| "tauri" (mixed) | Rust: \`cargo test\`, \`cargo clippy\` + Frontend: \`pnpm test\`, \`pnpm lint\` |
+
+### Environment Notes
+- **Rust projects:** Cargo may not be in PATH by default. Task 1 MUST include: \`source "$HOME/.cargo/env"\`
+- **Mixed projects (e.g., Tauri):** Quality gates MUST cover ALL stacks, not just one
+- **Per-Task Gates:** MUST use concrete commands, never placeholders like \`[file]\` or \`[module]\`
+
+For greenfield projects, add this comment above Full Gates:
+\`<!-- PROVISIONAL: Inferred from plan. Task 1 MUST verify these work. -->\`
+
+### Priority 4: Placeholder
+If you cannot determine quality gates:
+\`<!-- TODO: Discover quality gates in iteration 1 -->\`
+
+---
+
+The SPEC.md MUST follow this EXACT format:
+
+---
+name: __FEATURE_NAME__
+status: pending
+created: __DATE__
+plan_file: __PLAN_FILE__
+iteration_count: 0
+project_type: __PROJECT_TYPE__
+---
+
+# Feature: [Title from plan]
+
+## Overview
+
+[2-3 sentence summary extracted from the plan]
+
+## Requirements
+
+[Convert the plan's requirements/goals into checkbox items]
+- [ ] Requirement 1
+- [ ] Requirement 2
+[etc.]
+
+## Tasks
+
+<!--
+TASK ORDERING RULES (ENFORCED):
+1. Setup tasks MUST be first (dependencies, config)
+2. Each implementation task MUST specify its test file
+3. UI tasks MUST specify visual verification
+4. NEVER create 'run tests' as a separate task at the end
+-->
+
+### Pending
+
+#### Phase 1: Setup (MUST COMPLETE BEFORE IMPLEMENTATION)
+- [ ] Task 1: Setup project and verify quality gates
+  - Install dependencies (use appropriate package manager for project type)
+  - Run each quality gate command from the Quality Gates section below
+  - If any command fails (not found, wrong syntax), find the correct command
+  - Update this SPEC.md with verified working commands
+  - **Blocker if skipped**: Cannot run backpressure without working quality gates
+
+#### Phase 2: Implementation (Each task includes its own validation)
+[Break down the plan into small tasks. EACH TASK MUST INCLUDE:]
+
+- [ ] Task N: [Create/modify source file]
+  - File: \`src/path/to/file.ts\`
+  - Test: \`tests/unit/file.test.ts\` (CREATE IN SAME ITERATION)
+  - Validate: Run quality gates after changes
+  - Visual: (if UI component) \`agent-browser screenshot localhost:PORT/path\`
+
+#### Phase 3: Integration (After all implementation tasks)
+- [ ] Task N: Run full test suite and verify all integrations work
+  - Run: Full test suite including E2E if applicable
+  - Visual: Full page screenshots with agent-browser (if UI)
+
+### In Progress
+
+### Completed
+
+### Blocked
+
+## Quality Gates
+
+<!--
+BACKPRESSURE RULES (ENFORCED):
+- Run after EVERY task completion, not just at the end
+- If a gate fails, fix it in the SAME iteration
+- If dependencies aren't installed, STOP and install them first
+-->
+
+### Per-Task Gates (run after each task)
+- [ ] Lint passes on changed files
+- [ ] Types check on changed files
+- [ ] Related tests pass (the test file you created with the source file)
+
+### Full Gates (run after each iteration)
+[DISCOVER THESE using the priority order above - extract from plan, discover from project, or infer from plan text]
+- [ ] Tests pass: \`<discovered command>\`
+- [ ] Lint clean: \`<discovered command>\`
+- [ ] Types check: \`<discovered command>\`
+- [ ] Build succeeds: \`<discovered command>\`
+
+### Visual Gates (run after UI changes)
+- [ ] Screenshot captured with agent-browser
+- [ ] Visual diff acceptable (if baseline exists)
+
+## Exit Criteria
+
+[ALL must be true to mark complete]
+
+- [ ] All requirements checked off
+- [ ] All quality gates pass (not 'will pass later')
+- [ ] All tasks completed (including their test files)
+- [ ] Every source file has a corresponding test file
+- [ ] Code committed with meaningful messages
+- [ ] Ready for PR/review
+
+## Context
+
+### Key Files
+
+[From plan - list source files AND their corresponding test files]
+
+| Source File | Test File | Visual Check |
+|-------------|-----------|--------------|
+| \`src/path/to/file.ts\` | \`tests/unit/file.test.ts\` | No |
+| \`src/components/UI.tsx\` | \`tests/unit/UI.test.tsx\` | Yes - screenshot |
+
+### Patterns to Follow
+
+[Extract any patterns, conventions, or references mentioned in the plan]
+
+### Notes
+
+[Any important notes or considerations from the plan]
+
+## Iteration Log
+
+CRITICAL RULES:
+1. Task 1 MUST setup dependencies AND verify quality gates work - NEVER skip this
+2. EVERY implementation task MUST specify a test file to create IN THE SAME ITERATION
+3. UI tasks MUST include a Visual line with agent-browser command
+4. NEVER create 'run tests' or 'run lint' as separate tasks at the end - these run PER TASK
+5. Extract ALL requirements from the plan - don't leave any out
+6. Break tasks down small enough to complete in one iteration (~15-30 min each)
+7. Tasks should be specific and actionable, not vague
+8. Include file paths where known
+9. Copy any patterns/conventions mentioned in the plan to the Patterns section
+10. DO NOT include placeholder text like 'Requirement 1' - use actual content from the plan
+11. Quality gates MUST have actual commands, not placeholders - discover them!
+
+Write the SPEC.md file now.

@@ -1,0 +1,110 @@
+# Used by: cmd_fix() - converts review todo findings into a fix SPEC.md
+# Placeholders: __SPEC_NAME__, __FIX_TYPE_LABEL__, __ABS_TODO_FILES__,
+#   __FIX_DIR__, __TODAY_DATE__, __TODO_COUNT__, __PROJECT_TYPE__,
+#   __QUALITY_GATES__
+Convert review findings into a SPEC.md for implementation.
+
+PARENT SPEC: __SPEC_NAME__
+FIX TYPE: __FIX_TYPE_LABEL__
+
+READ these todo files:
+__ABS_TODO_FILES__
+
+CREATE the file: __FIX_DIR__/SPEC.md
+
+Follow this EXACT format:
+
+---
+name: __SPEC_NAME__-fixes-__FIX_TYPE_LABEL__
+status: pending
+created: __TODAY_DATE__
+parent_spec: __SPEC_NAME__
+fix_type: __FIX_TYPE_LABEL__
+todo_count: __TODO_COUNT__
+iteration_count: 0
+project_type: __PROJECT_TYPE__
+---
+
+# Fix: __SPEC_NAME__ (__FIX_TYPE_LABEL__)
+
+## Overview
+
+This spec addresses __TODO_COUNT__ __FIX_TYPE_LABEL__ findings from review of __SPEC_NAME__.
+
+## Requirements
+
+[Convert each todo's Problem Statement into a requirement checkbox]
+
+## Tasks
+
+### Pending
+
+#### Phase 1: Setup
+- [ ] Task 1: Verify dependencies and quality gates work
+  - Run: Install any missing dependencies
+  - Verify: All lint/test commands execute
+
+#### Phase 2: Fixes (ordered by priority - P1 first, then P2, then P3)
+
+[For each todo file, create a task like this:]
+
+- [ ] Task N: [Fix description from todo]
+  - File: `path/to/file.ts` (from todo's Findings section)
+  - Reference: `[relative path to todo]`
+  - Acceptance:
+    [Copy the Acceptance Criteria from the todo]
+
+#### Phase 3: Verification
+- [ ] Task N: Run full test suite and verify all fixes work
+  - Run: Full test suite
+  - Validate: All quality gates pass
+
+### In Progress
+
+### Completed
+
+### Blocked
+
+## Quality Gates
+
+### Per-Task Gates
+- [ ] Lint passes on changed files
+- [ ] Types check on changed files
+- [ ] Related tests pass
+
+### Full Gates
+__QUALITY_GATES__
+
+## Exit Criteria
+
+- [ ] All requirements checked off
+- [ ] All quality gates pass
+- [ ] All tasks completed
+- [ ] Code committed with meaningful messages
+
+## Context
+
+### Parent Spec
+__SPEC_NAME__
+
+### Source Todos
+
+| Priority | Todo File | Issue |
+|----------|-----------|-------|
+[List each todo with its priority and a brief issue description]
+
+### Notes
+
+These fixes originated from __FIX_TYPE_LABEL__ review of __SPEC_NAME__.
+Re-run `cr review` after fixes to verify issues are resolved.
+
+## Iteration Log
+
+IMPORTANT RULES:
+1. Order tasks by priority: P1 first, then P2, then P3
+2. Each task should reference its source todo file
+3. Copy acceptance criteria exactly from the todo files
+4. Include file paths from the todo's Findings section
+5. Do not add extra features - only fix the reported issues
+
+Write the SPEC.md file now.

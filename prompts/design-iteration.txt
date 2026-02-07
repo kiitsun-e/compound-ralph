@@ -1,0 +1,165 @@
+# Used by: cmd_design() - one iteration of the design improvement loop
+# Placeholders: __ITERATION__, __URL__, __STATE_FILE__, __SESSION_DIR__,
+#   __PREV_CONTEXT__
+You are in iteration __ITERATION__ of a design improvement loop.
+
+THIS ITERATION: Focus on ONE page only. Do not try to fix all pages at once.
+
+TARGET URL: __URL__
+STATE FILE: __STATE_FILE__
+SCREENSHOT DIR: __SESSION_DIR__/
+__PREV_CONTEXT__
+## Step 1: Read State & Identify Target Page
+
+Read the state file:
+```bash
+cat __STATE_FILE__
+```
+
+**If iteration 1 (pages/views not yet discovered):**
+1. Crawl the site to discover all URL-based pages:
+```bash
+agent-browser open __URL__
+agent-browser eval "Array.from(document.querySelectorAll('nav a, header a, footer a, [role=navigation] a, main a')).map(a => a.href).filter(h => h && h.startsWith(window.location.origin)).filter((v,i,a) => a.indexOf(v) === i)"
+```
+
+2. For EACH page, discover SPA view states:
+```bash
+agent-browser snapshot -i  # Look for tabs, view switchers, sidebars
+# Try keyboard shortcuts 1-5 to find view modes
+agent-browser press 1
+agent-browser snapshot -i  # Did view change?
+agent-browser press 2
+agent-browser snapshot -i  # Did view change?
+# Continue until no more views
+```
+
+3. Update the state file with ALL pages AND view states (mark all as [ ] pending):
+   - Simple pages: `- [ ] / (Landing)`
+   - SPA views: `- [ ] /dashboard:focus (Dashboard - Focus view)`
+   - SPA views: `- [ ] /dashboard:tree (Dashboard - Tree view)`
+   - Sidebar states: `- [ ] /dashboard:sidebar-collapsed`
+
+4. Your target for this iteration is the FIRST item in the list
+
+**If iteration 2+:**
+1. Find the FIRST item marked [ ] (pending) in the state file
+2. That is your ONE target page/view for this iteration
+3. If it's a view state (has : in it), navigate to the page then activate that view
+
+## Step 2: Screenshot Target Page/View (All Viewports)
+
+Screenshot ONLY your target page/view at all viewport sizes:
+```bash
+# Navigate to page
+agent-browser open [target-page-url]
+
+# If target is a view state (e.g., /dashboard:tree), activate it:
+# - Press keyboard shortcut (1-5) or click the view tab
+agent-browser press 2  # Example: activate tree view
+
+agent-browser resize 1920 1080
+agent-browser screenshot __SESSION_DIR__/before-iter__ITERATION__-[page-name]-[view]-1920.png
+
+agent-browser resize 1440 900
+agent-browser screenshot __SESSION_DIR__/before-iter__ITERATION__-[page-name]-[view]-1440.png
+
+agent-browser resize 1024 768
+agent-browser screenshot __SESSION_DIR__/before-iter__ITERATION__-[page-name]-[view]-1024.png
+
+agent-browser resize 375 812
+agent-browser screenshot __SESSION_DIR__/before-iter__ITERATION__-[page-name]-[view]-375.png
+```
+
+Naming examples:
+- `before-iter3-landing-1920.png` (simple page)
+- `before-iter3-dashboard-tree-1920.png` (view state)
+- `before-iter3-dashboard-sidebar-collapsed-375.png` (sidebar state)
+
+## Step 3: Analyze Target Page/View
+
+For your ONE target page/view, evaluate at each viewport:
+- Is it bland, generic, or 'AI-looking'?
+- Typography: hierarchy, font choices, spacing
+- Color: too much gray? No personality?
+- Layout: does it work at all viewport sizes?
+- Responsive: text compression at large widths? Layout breaks?
+
+## Step 4: Apply /frontend-design Philosophy
+
+Make this ONE page distinctive:
+- Bold, intentional choices (not safe defaults)
+- Typography, color, spacing, visual rhythm
+- Personality and craft
+- Consistent with any global styles already established
+
+**If iteration 1:** Also establish global styles (CSS variables, shared components) that will apply to all pages.
+
+## Step 5: Make Improvements to Target Page
+
+Fix the issues identified. For iteration 1, include global style changes.
+Run any build/dev commands if needed.
+
+## Step 6: Screenshot After (Target Page/View Only)
+
+```bash
+agent-browser open [target-page-url]
+# If view state, activate it again (press shortcut or click tab)
+
+agent-browser resize 1920 1080
+agent-browser screenshot __SESSION_DIR__/after-iter__ITERATION__-[page-name]-[view]-1920.png
+
+agent-browser resize 1440 900
+agent-browser screenshot __SESSION_DIR__/after-iter__ITERATION__-[page-name]-[view]-1440.png
+
+agent-browser resize 1024 768
+agent-browser screenshot __SESSION_DIR__/after-iter__ITERATION__-[page-name]-[view]-1024.png
+
+agent-browser resize 375 812
+agent-browser screenshot __SESSION_DIR__/after-iter__ITERATION__-[page-name]-[view]-375.png
+```
+
+## Step 7: Compare Before/After
+
+View both screenshots to verify improvement:
+```bash
+cat __SESSION_DIR__/before-iter__ITERATION__-[page-name]-[view]-1920.png
+cat __SESSION_DIR__/after-iter__ITERATION__-[page-name]-[view]-1920.png
+```
+
+Check for:
+- Visible improvement in design
+- No regressions (text compression, layout breaks)
+- Works at all viewport sizes
+
+If issues found, fix them before proceeding.
+
+## Step 8: Update State File
+
+Mark your target page/view as complete and log changes:
+```bash
+cat __STATE_FILE__
+# Then use Edit tool to update it
+```
+
+Change the item from [ ] to [x] and add to Changes Made section:
+- What you changed on this page/view
+- Any global styles added (iteration 1)
+
+## Step 9: Check Completion
+
+Read the updated state file. If ALL pages/views are marked [x] complete:
+Output: <design-complete>Design polished.</design-complete>
+
+If there are still [ ] pending items, do NOT output the completion tag.
+The next iteration will handle the next page/view.
+
+IMPORTANT:
+- ONE page/view per iteration - do not try to do multiple
+- Iteration 1 should discover ALL pages AND view states (SPA-aware)
+- Iteration 1 should also establish global styles
+- View states on same page share CSS, so later views may need less work
+- Always verify all 4 viewport sizes (1920, 1440, 1024, 375)
+- Update state file before finishing so next iteration knows progress
+
+Start by reading __STATE_FILE__ to find your target page/view for this iteration.
