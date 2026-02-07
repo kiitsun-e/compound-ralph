@@ -1,19 +1,14 @@
 # Compound Ralph
 
-Autonomous Feature Implementation System combining compound-engineering's rich planning with the Ralph Loop technique for iterative, self-correcting code generation.
+Autonomous feature implementation system combining compound-engineering's rich planning with the Ralph Loop technique for iterative, self-correcting code generation.
 
-## Philosophy
+## What Is This?
 
-**Understand first. Plan with context. Build autonomously.**
+`cr` is a bash CLI (~5,500 lines) that orchestrates [Claude Code](https://claude.ai/code) for autonomous feature implementation. It calls `claude --print` in a loop, using SPEC.md files as state and AGENTS.md for build/test/lint commands.
 
-Each unit of engineering work should make subsequent units easier. Compound Ralph achieves this by:
+The key insight: **fresh context per iteration + file-based state + quality gate backpressure**. Each iteration starts with a clean context window, reads the current state from SPEC.md, does one task, runs all quality gates (tests, lint, types, build), and writes results back. If something breaks, the next iteration sees the failure and self-corrects.
 
-1. **Exploration Phase** - Socratic dialogue to surface assumptions and explore trade-offs
-2. **Research Phase** - Deep investigation of feasibility, best practices, and risks
-3. **Rich Planning Phase** - Human + AI collaboration informed by knowledge from prior phases
-4. **Autonomous Building Phase** - Loop executes one task per iteration with fresh context
-5. **Continuous Backpressure** - Tests, lint, types run every iteration for self-correction
-6. **Compounding Learnings** - Notes and patterns accumulate across iterations
+You handle the thinking (converse, research, plan). The machine handles the building (implement loop). File-based state is the bridge.
 
 ## Installation
 
@@ -76,211 +71,109 @@ ln -s ~/Desktop/coding-projects/compound-ralph/cr /usr/local/bin/cr
 cd your-project
 cr init
 
-# 2. (Optional) Explore the idea before committing
+# 2. Explore the idea (optional)
 cr converse "user authentication approach"
-# Socratic dialogue surfaces assumptions and trade-offs
-# Saves decision record to knowledge/decisions/
 
-# 3. (Optional) Research before planning
+# 3. Research before planning (optional)
 cr research "JWT vs session-based auth"
-# Deep investigation of feasibility, best practices, risks
-# Saves research report to knowledge/research/
 
-# 4. Create a rich, researched plan (INTERACTIVE)
+# 4. Create a rich plan (interactive)
 cr plan "add user authentication with JWT"
-# Automatically reads knowledge/ from steps 2-3
-# Claude will ask clarifying questions - answer them!
-# When satisfied, run /deepen-plan then exit
 
 # 5. Convert plan to SPEC format
 cr spec plans/add-user-authentication-with-jwt.md
 
-# 6. Edit SPEC.md to refine tasks and context
-# (This is your chance to guide the implementation)
-
-# 7. Start autonomous implementation (AUTONOMOUS)
+# 6. Start autonomous implementation
 cr implement
 # Walk away - Claude works through tasks one by one
 
-# 8. Review the implementation
+# 7. Review the implementation
 cr review
-# Multi-dimensional code review, creates todos for issues
 
-# 9. Extract learnings (COMPOUND PHASE)
+# 8. Fix any issues found
+cr fix
+cr implement
+
+# 9. Extract learnings
 cr compound user-authentication
-# Captures patterns, decisions, pitfalls for future work
-# Every feature should make subsequent features easier
 ```
 
-## The Full Workflow
-
 ```
-CONVERSE → RESEARCH → PLAN → IMPLEMENT → REVIEW → COMPOUND
+CONVERSE -> RESEARCH -> PLAN -> SPEC -> IMPLEMENT -> REVIEW -> FIX -> COMPOUND
 ```
 
-## Extended Workflow
-
-For more complex features, extend the basic workflow with review and knowledge extraction:
-
-```bash
-# 8. Review the implementation
-cr review
-# Multi-dimensional code review, creates todos for issues
-
-# 9. Extract learnings (COMPOUND PHASE)
-cr compound user-authentication
-# Captures patterns, decisions, pitfalls for future work
-# Every feature should make subsequent features easier
-```
-
-### Full Workflow Diagram
-
-```
-CONVERSE → RESEARCH → PLAN → IMPLEMENT → REVIEW → COMPOUND
-     ↓          ↓        ↓          ↓        ↓
-  Explore   Investigate  Plan    Build    Learn
-```
-
-### Review & Compound Phases
-
-| Phase | Mode | Your Role |
-|-------|------|-----------|
-| **Review** | Interactive | Review findings, approve or request fixes |
-| **Compound** | Interactive | Review extracted learnings, add insights |
-
-## Three Modes
-
-| Phase | Mode | Your Role |
-|-------|------|-----------|
-| **Exploration** | Interactive | Converse about ideas, review research reports |
-| **Planning** | Interactive | Answer questions, refine scope, run /deepen-plan |
-| **Implementation** | Autonomous | Walk away, check back later |
-| **Review** | Interactive | Review findings, approve or request fixes |
-| **Compound** | Interactive | Review extracted learnings, add insights |
+For a real-world walkthrough of this workflow in action, see [docs/workflow-example.md](docs/workflow-example.md).
 
 ## Commands
 
-### `cr init [path]`
+### Core Workflow
 
-Initialize a project for Compound Ralph.
+#### `cr init [path]`
+Initialize a project for Compound Ralph. Creates `specs/`, `plans/`, `knowledge/` directories and generates `AGENTS.md` with auto-detected build/test commands. Supports bun, npm, yarn, pnpm, rails, python, go, and rust.
 
-- Creates `specs/`, `plans/`, and `knowledge/` directories
-- Generates `AGENTS.md` with auto-detected build/test commands
-- Supports: bun, npm, yarn, pnpm, rails, python, go, rust
+#### `cr converse <topic>` (alias: `conv`)
+Start an exploratory Socratic dialogue about an idea before committing to a plan. Surfaces assumptions, explores alternatives, and clarifies trade-offs. Saves decision records to `knowledge/decisions/` for use in later planning.
 
-```bash
-cr init                    # Current directory
-cr init ~/projects/myapp   # Specific path
-```
+#### `cr research <topic>` (alias: `res`)
+Deep investigation before planning. Analyzes codebase for existing patterns, researches best practices, assesses feasibility and risks with confidence levels. Saves reports to `knowledge/research/`.
 
-### `cr converse <topic>`
+#### `cr plan <description>`
+Create and enrich a feature plan using compound-engineering workflows. Automatically reads `knowledge/decisions/` and `knowledge/research/` from prior sessions. Runs `/workflows:plan` + `/deepen-plan` with 40+ parallel research agents.
 
-Start an exploratory conversation about an idea before committing to a plan.
+#### `cr spec <plan-file>`
+Convert a plan to the SPEC.md format for autonomous implementation. Creates `specs/<feature>/` with SPEC.md (state file) and PROMPT.md (iteration instructions). Auto-detects quality gates based on project type.
 
-- Activates a Socratic dialogue persona
-- Guides through: Understand → Assumptions → Alternatives → Trade-offs → Decide
-- Asks hard questions: "Are we solving the right problem?" / "What's the cost of being wrong?"
-- Saves decision records to `knowledge/decisions/YYYY-MM-DD-<topic>.md`
-- Decision records are automatically fed into `cr plan`
+#### `cr implement [spec-dir]` (aliases: `build`, `run`)
+Start the autonomous implementation loop. Reads SPEC.md, executes one task per iteration, runs all quality gates each iteration, updates state and commits progress. Continues until completion or max iterations. Supports `--json` and `--non-interactive` flags.
 
-```bash
-cr converse "user authentication approach"
-cr converse "how should we handle caching"
-```
+#### `cr review [spec-dir]`
+Run comprehensive code review. Discovers issues and saves todos to `specs/<feature>/todos/code/`. Supports `--design` for visual review (uses agent-browser screenshots), `--design-only`, `--url` for custom dev server URL, and `--team` for parallel agent team review.
 
-### `cr research <topic>`
+#### `cr fix [type] [spec-dir]`
+Convert review todos into a fix spec. Use `cr fix code` for code issues only, `cr fix design` for design issues only, or `cr fix` for all. Creates fix specs under `specs/<feature>/fixes/`, then run `cr implement` to apply fixes.
 
-Deep investigation before planning — understand before you build.
+#### `cr compound [feature]` (alias: `comp`)
+Extract and preserve learnings after implementation. Captures patterns, decisions, and pitfalls. Saves to `knowledge/learnings/` and `knowledge/patterns/`. Makes future features easier by compounding knowledge.
 
-- Analyzes codebase for existing patterns and dependencies
-- Researches external best practices and common pitfalls
-- Assesses technical feasibility, complexity, and risks
-- States confidence levels (High/Medium/Low/Unknown)
-- Saves research reports to `knowledge/research/<topic>.md`
-- Research reports are automatically fed into `cr plan`
+### Testing
 
-```bash
-cr research "oauth implementation best practices"
-cr research "caching strategies for our API"
-```
+#### `cr test-gen <spec>` (aliases: `testgen`, `tg`)
+Generate E2E tests from a feature spec. Reads SPEC.md and produces WebdriverIO test files using LLM to translate requirements into test code. Supports `--output`, `--example-tests`, `--dry-run`, and `--all` flags.
 
-### `cr plan <description>`
+#### `cr init-tests` (alias: `init-e2e`)
+Set up WebdriverIO E2E testing infrastructure. Creates `wdio.conf.js`, test directory, and smoke test. Installs dependencies and adds npm scripts. Supports `--force` and `--test-dir` flags.
 
-Create and enrich a feature plan using compound-engineering workflows.
+### Design
 
-- **Automatically reads** `knowledge/decisions/` and `knowledge/research/` to incorporate prior converse/research findings
-- Runs `/workflows:plan` to create structured plan
-- Runs `/deepen-plan` to enrich with 40+ parallel research agents
-- Outputs to `plans/<feature-name>.md`
+#### `cr design [url]`
+Proactive design improvement loop. Auto-detects dev server, discovers all pages and SPA view states (nav links, keyboard shortcuts, tabs, sidebars), takes screenshots, and uses the `/frontend-design` skill for distinctive UI. Supports `--n N` to force exactly N iterations. Saves screenshots to `design-iterations/`.
 
-```bash
-cr plan "add dark mode toggle with system preference detection"
-```
+### Utility
 
-### `cr spec <plan-file>`
+#### `cr status`
+Show progress of all specs including fix specs. Displays status, iteration count, and task completion. Supports `--json` for machine-readable output.
 
-Convert a plan to the SPEC.md format for autonomous implementation.
+#### `cr learnings [category] [limit]`
+View project learnings from `.cr/learnings.json`. Categories: environment, pattern, gotcha, fix, discovery. Default limit: 20.
 
-- Creates `specs/<feature>/` directory
-- Generates `SPEC.md` (state file) and `PROMPT.md` (iteration instructions)
-- Auto-detects quality gates based on project type
+#### `cr reset-context <spec-dir>`
+Reset accumulated context for a stuck spec. Use when the agent has learned harmful patterns (e.g., dismissing errors as "pre-existing"). Clears bad learnings and allows a fresh start.
 
-```bash
-cr spec plans/add-dark-mode-toggle.md
-```
+#### `cr help`
+Show full usage information with all commands, flags, and workflow examples.
 
-### `cr implement [spec-dir]`
+#### `cr version`
+Print the current version.
 
-Start the autonomous implementation loop.
+## Workflow Phases
 
-- Reads SPEC.md as single source of truth
-- Executes one task per iteration
-- Runs all quality gates (backpressure) each iteration
-- Updates state and commits progress
-- Continues until completion or max iterations
+There are three interaction modes across the workflow:
 
-```bash
-cr implement                        # Auto-find active spec
-cr implement specs/dark-mode/       # Specific spec
-MAX_ITERATIONS=100 cr implement     # Override max iterations
-```
-
-### `cr status`
-
-Show progress of all specs.
-
-```bash
-cr status
-# Output:
-# Spec                     Status      Iterations  Tasks
-# dark-mode               building    5           3/7
-# user-auth               complete    12          8/8
-# payment-flow            pending     0           0/5
-```
-
-### `cr compound [feature]`
-
-Extract and preserve learnings after implementation (Phase 6).
-
-- Captures patterns that worked well
-- Documents decisions and their reasoning
-- Identifies pitfalls to avoid in future work
-- Makes subsequent features easier by compounding knowledge
-
-```bash
-cr compound user-authentication     # Extract learnings from specific feature
-cr compound                         # Extract learnings from recent work
-```
-
-**Output:**
-- `knowledge/learnings/` - Specific lessons from the feature
-- `knowledge/patterns/` - Reusable patterns worth codifying
-
-**Hard questions this phase answers:**
-- "What did we learn that we'll forget in 3 months?"
-- "What decisions did we make that future us will question?"
-- "What patterns are emerging that should be codified?"
-- "What mistakes are we at risk of repeating?"
+| Mode | Commands | Your Role |
+|------|----------|-----------|
+| **Interactive** | converse, research, plan, review, compound | You participate in dialogue, answer questions, guide direction |
+| **Autonomous** | implement | Walk away -- the loop runs unattended with quality gate backpressure |
+| **Hybrid** | design | Autonomous iterations with periodic review |
 
 ## Architecture
 
@@ -298,6 +191,12 @@ your-project/
     └── feature-name/
         ├── SPEC.md           # State file (single source of truth)
         ├── PROMPT.md         # Iteration instructions
+        ├── todos/
+        │   ├── code/         # Code review findings
+        │   └── design/       # Design review findings
+        ├── fixes/
+        │   ├── code/         # Fix spec for code issues
+        │   └── design/       # Fix spec for design issues
         └── .history/         # Logs from each iteration
             ├── 001-20260121-143022.md
             └── 002-20260121-143145.md
@@ -351,62 +250,62 @@ Each iteration follows this cycle:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ 1. ORIENT - Load fresh context                              │
-│    • Read SPEC.md (source of truth)                        │
-│    • Read plan file                                         │
-│    • Check iteration log for learnings                     │
-│    • Study key files                                        │
+│    - Read SPEC.md (source of truth)                         │
+│    - Read plan file                                         │
+│    - Check iteration log for learnings                      │
+│    - Study key files                                        │
 └─────────────────────────────────────────────────────────────┘
-                            ↓
+                            |
 ┌─────────────────────────────────────────────────────────────┐
 │ 2. SELECT - Pick ONE task                                   │
-│    • Continue "In Progress" if exists                       │
-│    • Otherwise pick highest priority "Pending"              │
-│    • Move to "In Progress" BEFORE starting                  │
+│    - Continue "In Progress" if exists                       │
+│    - Otherwise pick highest priority "Pending"              │
+│    - Move to "In Progress" BEFORE starting                  │
 └─────────────────────────────────────────────────────────────┘
-                            ↓
+                            |
 ┌─────────────────────────────────────────────────────────────┐
 │ 3. INVESTIGATE - Don't assume not implemented               │
-│    • Search codebase for existing implementations           │
-│    • Check if task is partially done                        │
-│    • Update notes with discoveries                          │
+│    - Search codebase for existing implementations           │
+│    - Check if task is partially done                        │
+│    - Update notes with discoveries                          │
 └─────────────────────────────────────────────────────────────┘
-                            ↓
+                            |
 ┌─────────────────────────────────────────────────────────────┐
 │ 4. IMPLEMENT - Execute the task                             │
-│    • Follow patterns from Context section                   │
-│    • Write tests alongside (not after)                      │
-│    • Keep focused on ONE task                               │
+│    - Follow patterns from Context section                   │
+│    - Write tests alongside (not after)                      │
+│    - Keep focused on ONE task                               │
 └─────────────────────────────────────────────────────────────┘
-                            ↓
+                            |
 ┌─────────────────────────────────────────────────────────────┐
 │ 5. VALIDATE - Run backpressure                              │
-│    • bun test                                               │
-│    • bun run lint                                           │
-│    • bun run typecheck                                      │
-│    • bun run build                                          │
-│    • Fix issues before continuing                           │
+│    - bun test                                               │
+│    - bun run lint                                           │
+│    - bun run typecheck                                      │
+│    - bun run build                                          │
+│    - Fix issues before continuing                           │
 └─────────────────────────────────────────────────────────────┘
-                            ↓
+                            |
 ┌─────────────────────────────────────────────────────────────┐
 │ 6. UPDATE - Record progress                                 │
-│    • Move task to "Completed"                               │
-│    • Add learnings to Notes                                 │
-│    • Update iteration count                                 │
-│    • Add to Iteration Log                                   │
+│    - Move task to "Completed"                               │
+│    - Add learnings to Notes                                 │
+│    - Update iteration count                                 │
+│    - Add to Iteration Log                                   │
 └─────────────────────────────────────────────────────────────┘
-                            ↓
+                            |
 ┌─────────────────────────────────────────────────────────────┐
 │ 7. COMMIT & CHECK - Save and evaluate                       │
-│    • git commit meaningful progress                         │
-│    • Check all exit criteria                                │
-│    • If ALL met → output completion promise                 │
-│    • If not → next iteration continues                      │
+│    - git commit meaningful progress                         │
+│    - Check all exit criteria                                │
+│    - If ALL met -> output completion promise                │
+│    - If not -> next iteration continues                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## Backpressure
 
-**Backpressure** = automated feedback that lets agents self-correct without human intervention.
+**Backpressure** = automated feedback that lets agents self-correct without human intervention. See [docs/backpressure.md](docs/backpressure.md) for a deeper explanation.
 
 ### Hard Gates (Deterministic)
 - Tests pass/fail
@@ -438,6 +337,9 @@ Compound Ralph auto-detects your project type and sets appropriate quality gates
 | `ITERATION_DELAY` | 3 | Seconds between iterations |
 | `MAX_RETRIES` | 3 | Retries per iteration on transient errors |
 | `RETRY_DELAY` | 5 | Initial retry delay (doubles with each retry) |
+| `ITERATION_TIMEOUT` | 600 | Max seconds per iteration before timeout |
+| `MAX_CONSECUTIVE_FAILURES` | 3 | Stop after N consecutive failures |
+| `NO_COLOR` | - | Disable colored output ([no-color.org](https://no-color.org/)) |
 
 ```bash
 MAX_ITERATIONS=100 ITERATION_DELAY=5 cr implement
@@ -454,7 +356,7 @@ The loop automatically recovers from transient errors:
 
 When an error occurs:
 1. Waits `RETRY_DELAY` seconds (default: 5s)
-2. Retries with exponential backoff (5s → 10s → 20s)
+2. Retries with exponential backoff (5s -> 10s -> 20s)
 3. After `MAX_RETRIES` failures, skips to next iteration
 4. Loop continues - no human intervention needed
 
@@ -475,10 +377,10 @@ The more context in your plan, the better the implementation:
 ### 2. Task Granularity Matters
 
 Break tasks small enough to complete in one iteration (~15-30 min of work):
-- ❌ "Implement authentication" (too big)
-- ✅ "Create User model with validation"
-- ✅ "Add login API endpoint"
-- ✅ "Create login form component"
+- "Implement authentication" (too big)
+- "Create User model with validation" (right size)
+- "Add login API endpoint" (right size)
+- "Create login form component" (right size)
 
 ### 3. Quality Gates Are Your Friend
 
@@ -510,28 +412,11 @@ Don't micro-manage. If backpressure is set up correctly:
 - Lint catches style issues
 - The loop self-corrects
 
-## Troubleshooting
+## Further Reading
 
-### Loop stops early without completing
-
-Check the SPEC.md:
-- Are all exit criteria achievable?
-- Is the completion promise being output correctly?
-- Are there blocked tasks that can't proceed?
-
-### Same error repeating
-
-1. Check `.history/` logs for patterns
-2. Add the error pattern to Notes section
-3. The next iteration will see the learning
-
-### Context seems lost between iterations
-
-This is by design! Each iteration has fresh context. Information persists via:
-- SPEC.md (state file)
-- AGENTS.md (commands)
-- Git history (changes)
-- Notes section (learnings)
+- [docs/workflow-example.md](docs/workflow-example.md) - Real-world walkthrough of a full feature implementation
+- [docs/backpressure.md](docs/backpressure.md) - Deep dive into the backpressure concept
+- [docs/prompting-patterns.md](docs/prompting-patterns.md) - Prompt engineering patterns used in cr
 
 ## Sources & Inspiration
 
