@@ -144,6 +144,15 @@ log_step() {
     echo -e "\n${CYAN}${BOLD}=== $1 ===${NC}\n"
 }
 
+# Portable sed in-place edit (macOS uses -i '', Linux uses -i)
+sed_inplace() {
+    if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' "$@"
+    else
+        sed -i "$@"
+    fi
+}
+
 # Load a prompt file from the prompts/ directory.
 # Prompts were previously inline for single-file portability but were extracted
 # to separate files for maintainability. Prompt files must be co-located with
@@ -1212,8 +1221,7 @@ add_learning() {
         escaped_learning=$(printf '%s' "$learning" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')
         escaped_spec=$(printf '%s' "$spec" | sed 's/\\/\\\\/g; s/"/\\"/g')
         local entry="{\"date\":\"$(date -Iseconds)\",\"spec\":\"$escaped_spec\",\"iteration\":$iteration,\"category\":\"$category\",\"learning\":\"$escaped_learning\",\"files\":[]}"
-        sed -i '' 's/\]}/,'"$entry"']}/' "$learnings_file" 2>/dev/null || \
-        sed -i 's/\]}/,'"$entry"']}/' "$learnings_file"
+        sed_inplace 's/\]}/,'"$entry"']}/' "$learnings_file" 2>/dev/null
     fi
 }
 
@@ -3043,11 +3051,11 @@ cmd_implement() {
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             exit 0
         fi
-        sed -i '' 's/status: complete/status: building/' "$spec_file"
+        sed_inplace 's/status: complete/status: building/' "$spec_file"
     fi
 
     # Update status to building
-    sed -i '' 's/status: pending/status: building/' "$spec_file" 2>/dev/null || true
+    sed_inplace 's/status: pending/status: building/' "$spec_file" 2>/dev/null || true
 
     # Check if PROMPT.md is outdated compared to template
     local prompt_file="$spec_dir/PROMPT.md"
@@ -3115,8 +3123,7 @@ cmd_implement() {
             # Run integration verification
             if verify_integration; then
                 log_success "All tasks complete and verified!"
-                sed -i '' 's/status: building/status: complete/' "$spec_file" 2>/dev/null || \
-                sed -i 's/status: building/status: complete/' "$spec_file"
+                sed_inplace 's/status: building/status: complete/' "$spec_file"
                 emit_json_result "complete" "$iteration" "$spec_file" 0
                 echo ""
                 echo "Next steps:"
@@ -3377,7 +3384,7 @@ Start by reading both files now."
                 log_success "Feature complete after $iteration iterations!"
 
                 # Update spec status
-                sed -i '' 's/status: building/status: complete/' "$spec_file"
+                sed_inplace 's/status: building/status: complete/' "$spec_file"
 
                 emit_json_result "complete" "$iteration" "$spec_file" 0
                 echo ""
