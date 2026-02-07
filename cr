@@ -518,6 +518,28 @@ check_config_changed() {
     return 1  # Unchanged
 }
 
+# Validate a command string for dangerous shell metacharacters
+# Rejects commands containing chaining operators, subshells, or redirections
+# that could indicate injection. Returns 0 if safe, 1 if rejected.
+# Usage: validate_command "$cmd"
+validate_command() {
+    local cmd="$1"
+
+    # Reject commands containing dangerous shell metacharacters.
+    # Allow safe stderr redirects (2>/dev/null, 2>&1) but block general redirections.
+    # Strip safe patterns first, then check for dangerous ones.
+    local sanitized
+    sanitized=$(echo "$cmd" | sed -e 's/2>\/dev\/null//g' -e 's/2>\&1//g')
+
+    if echo "$sanitized" | grep -qE '; |&&|\|\||`|\$\(|>>|>[^&]' || \
+       echo "$sanitized" | grep -qE '\|[^|]'; then
+        log_warn "SECURITY: Rejected command with dangerous metacharacters: $cmd"
+        return 1
+    fi
+
+    return 0
+}
+
 # Run lightweight per-iteration checks (tests + lint on changed files)
 # Extract quality gate commands from SPEC.md
 # Parses the "Quality Gates" section for backtick commands
@@ -676,11 +698,19 @@ run_iteration_checks() {
             [[ "$cmd" == *"agent-browser"* ]] && continue
 
             log_info "Running quality gate: $cmd"
+
+            # Validate command before execution
+            if ! validate_command "$cmd"; then
+                ITERATION_ISSUES+=("Quality gate rejected (unsafe command): $cmd")
+                all_passed=false
+                continue
+            fi
+
             spec_commands_run=$((spec_commands_run + 1))
 
             # Capture output for failure tracking
             local gate_output
-            gate_output=$(eval "$cmd" 2>&1 | tail -50)
+            gate_output=$(bash -c "$cmd" 2>&1 | tail -50)
             local gate_exit_code=${PIPESTATUS[0]}
 
             echo "$gate_output" | tail -20
@@ -721,7 +751,11 @@ run_iteration_checks() {
             [[ "$cmd" == *"agent-browser"* ]] && continue
 
             log_info "Running informational gate: $cmd"
-            if ! eval "$cmd" 2>&1 | tail -10; then
+            if ! validate_command "$cmd"; then
+                log_warn "Informational gate rejected (unsafe command): $cmd"
+                continue
+            fi
+            if ! bash -c "$cmd" 2>&1 | tail -10; then
                 log_warn "Informational gate failed (non-blocking): $cmd"
             fi
         done < <(get_spec_informational_commands "$spec_file")
@@ -742,7 +776,10 @@ run_iteration_checks() {
         test_cmd=$(get_project_config "commands.test")
         if [[ -n "$test_cmd" ]]; then
             log_info "Running discovered test command: $test_cmd"
-            if ! eval "CI=true $test_cmd" 2>&1 | tail -20; then
+            if ! validate_command "$test_cmd"; then
+                ITERATION_ISSUES+=("Tests rejected (unsafe command): $test_cmd")
+                all_passed=false
+            elif ! bash -c "CI=true $test_cmd" 2>&1 | tail -20; then
                 ITERATION_ISSUES+=("Tests failed")
                 all_passed=false
             fi
@@ -753,7 +790,10 @@ run_iteration_checks() {
             if grep -q '"lint"' package.json 2>/dev/null; then
                 local lint_cmd="$pkg_manager run lint"
                 log_info "Running discovered lint command: $lint_cmd"
-                if ! eval "$lint_cmd" 2>&1 | tail -10; then
+                if ! validate_command "$lint_cmd"; then
+                    ITERATION_ISSUES+=("Lint rejected (unsafe command): $lint_cmd")
+                    all_passed=false
+                elif ! bash -c "$lint_cmd" 2>&1 | tail -10; then
                     ITERATION_ISSUES+=("Lint failed")
                     all_passed=false
                 fi
@@ -1657,7 +1697,7 @@ discover_quality_commands() {
         *)
             # Unknown project type - try common commands
             if [[ -f "package.json" ]]; then
-                quality_commands+=("npm test 2>/dev/null || true")
+                quality_commands+=("npm test")
             fi
             ;;
     esac
@@ -1685,9 +1725,16 @@ run_quality_gates() {
 
         log_info "Gate: $cmd"
 
+        # Validate command before execution
+        if ! validate_command "$cmd"; then
+            log_error "Gate REJECTED (unsafe command): $cmd"
+            failed=1
+            continue
+        fi
+
         # Run command and capture output
         set +e
-        gate_output=$(eval "$cmd" 2>&1)
+        gate_output=$(bash -c "$cmd" 2>&1)
         local exit_code=$?
         set -e
 
@@ -1765,7 +1812,10 @@ verify_integration() {
     db_cmd=$(get_project_config "commands.db")
     if [[ -n "$db_cmd" ]]; then
         log_info "Running database setup: $db_cmd"
-        if ! eval "$db_cmd" 2>/dev/null; then
+        if ! validate_command "$db_cmd"; then
+            INTEGRATION_FAILURES+=("Database setup rejected (unsafe command): $db_cmd")
+            all_passed=false
+        elif ! bash -c "$db_cmd" 2>/dev/null; then
             INTEGRATION_FAILURES+=("Database setup failed: $db_cmd")
             all_passed=false
         fi
@@ -1785,8 +1835,13 @@ verify_integration() {
             [[ "$cmd" == *"agent-browser"* ]] && continue
 
             log_info "Running SPEC test: $cmd"
+            if ! validate_command "$cmd"; then
+                INTEGRATION_FAILURES+=("Tests rejected (unsafe command): $cmd")
+                all_passed=false
+                continue
+            fi
             tests_run=$((tests_run + 1))
-            if ! eval "CI=true $cmd" 2>&1 | tail -20; then
+            if ! bash -c "CI=true $cmd" 2>&1 | tail -20; then
                 INTEGRATION_FAILURES+=("Tests failed: $cmd")
                 all_passed=false
             fi
@@ -1799,7 +1854,10 @@ verify_integration() {
         test_cmd=$(get_project_config "commands.test")
         if [[ -n "$test_cmd" ]]; then
             log_info "Running tests: $test_cmd"
-            if ! eval "CI=true $test_cmd" 2>/dev/null; then
+            if ! validate_command "$test_cmd"; then
+                INTEGRATION_FAILURES+=("Tests rejected (unsafe command): $test_cmd")
+                all_passed=false
+            elif ! bash -c "CI=true $test_cmd" 2>/dev/null; then
                 INTEGRATION_FAILURES+=("Tests failed: $test_cmd")
                 all_passed=false
             fi
@@ -1825,8 +1883,15 @@ verify_integration() {
         local e2e_temp
         e2e_temp=$(mktemp)
 
+        # Validate e2e command before execution
+        if ! validate_command "$test_e2e_cmd"; then
+            INTEGRATION_FAILURES+=("E2E tests rejected (unsafe command): $test_e2e_cmd")
+            all_passed=false
+            rm -f "$e2e_temp"
+        else
+
         # Run with CI=true to disable interactive features
-        eval "CI=true $test_e2e_cmd" > "$e2e_temp" 2>&1 || e2e_exit_code=$?
+        bash -c "CI=true $test_e2e_cmd" > "$e2e_temp" 2>&1 || e2e_exit_code=$?
 
         e2e_output=$(cat "$e2e_temp")
         rm -f "$e2e_temp"
@@ -1865,6 +1930,7 @@ verify_integration() {
             INTEGRATION_FAILURES+=("E2E tests failed - no tests passed")
             all_passed=false
         fi
+        fi  # end validate_command else block
     fi
 
     # 6. Check if build works using discovered command
@@ -1872,7 +1938,10 @@ verify_integration() {
     build_cmd=$(get_project_config "commands.build")
     if [[ -n "$build_cmd" ]]; then
         log_info "Verifying build: $build_cmd"
-        if ! eval "$build_cmd" 2>/dev/null; then
+        if ! validate_command "$build_cmd"; then
+            INTEGRATION_FAILURES+=("Build rejected (unsafe command): $build_cmd")
+            all_passed=false
+        elif ! bash -c "$build_cmd" 2>/dev/null; then
             INTEGRATION_FAILURES+=("Build failed: $build_cmd")
             all_passed=false
         fi
