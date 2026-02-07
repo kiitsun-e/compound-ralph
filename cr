@@ -548,6 +548,77 @@ check_config_changed() {
     return 1  # Unchanged
 }
 
+# Validate a command string against an allowlist of safe executables and characters.
+# Security comes from THIS VALIDATOR, not from the execution method (bash -c).
+# bash -c is functionally equivalent to eval for injection purposes — we use it
+# for process isolation consistency, not for injection prevention.
+#
+# Known bypass vectors NOT fully covered (defense-in-depth, not a sandbox):
+#   - Newline injection: $'cmd1\ncmd2'
+#   - ${} parameter expansion in arguments
+#   - Heredocs (<<)
+# TODO: Consider a stricter sandbox (e.g., firejail) for untrusted projects.
+#
+# Returns 0 if safe, 1 if rejected.
+# Usage: validate_command "$cmd"
+validate_command() {
+    local cmd="$1"
+
+    # Strip safe patterns before validation: stderr redirects and || true (non-fatal suffix)
+    local sanitized
+    sanitized=$(echo "$cmd" | sed -e 's/2>\/dev\/null//g' -e 's/2>\&1//g' -e 's/|| true//g' | xargs)
+
+    # Extract the first word (the executable)
+    local first_word
+    first_word=$(echo "$sanitized" | awk '{print $1}')
+
+    # Remove CI=true or CI=1 prefix if present (environment variable prefix)
+    if [[ "$first_word" == "CI=true" ]] || [[ "$first_word" == "CI=1" ]]; then
+        sanitized=$(echo "$sanitized" | sed 's/^CI=[^ ]* //')
+        first_word=$(echo "$sanitized" | awk '{print $1}')
+    fi
+
+    # Normalize path-prefixed executables (e.g., bin/rails -> rails)
+    local exe_name
+    exe_name=$(basename "$first_word")
+
+    # Allowlist of known safe executables
+    local -a allowed_executables=(
+        bun npm yarn pnpm npx bunx node
+        python ruby bundle rails pytest rspec
+        cargo go make tsc eslint prettier
+        ruff mypy bandit golangci-lint gosec
+    )
+
+    local allowed=false
+    for exe in "${allowed_executables[@]}"; do
+        if [[ "$exe_name" == "$exe" ]]; then
+            allowed=true
+            break
+        fi
+    done
+
+    if [[ "$allowed" != "true" ]]; then
+        log_warn "SECURITY: Rejected command with disallowed executable '$first_word': $cmd"
+        return 1
+    fi
+
+    # After confirming the executable, verify the rest contains only safe characters:
+    # alphanumeric, spaces, dashes, dots, slashes, equals, colons, quotes, @, underscores
+    local rest
+    rest=$(echo "$sanitized" | sed 's/^[^ ]* //')
+    if [[ "$sanitized" == "$first_word" ]]; then
+        rest=""  # No arguments
+    fi
+
+    if [[ -n "$rest" ]] && echo "$rest" | grep -qE '[^a-zA-Z0-9 _./:=@"'"'"'-]'; then
+        log_warn "SECURITY: Rejected command with unsafe characters in arguments: $cmd"
+        return 1
+    fi
+
+    return 0
+}
+
 # Run lightweight per-iteration checks (tests + lint on changed files)
 # Extract quality gate commands from SPEC.md
 # Parses the "Quality Gates" section for backtick commands
@@ -706,11 +777,19 @@ run_iteration_checks() {
             [[ "$cmd" == *"agent-browser"* ]] && continue
 
             log_info "Running quality gate: $cmd"
+
+            # Validate command before execution
+            if ! validate_command "$cmd"; then
+                ITERATION_ISSUES+=("Quality gate rejected (unsafe command): $cmd")
+                all_passed=false
+                continue
+            fi
+
             spec_commands_run=$((spec_commands_run + 1))
 
             # Capture output for failure tracking
             local gate_output
-            gate_output=$(eval "$cmd" 2>&1 | tail -50)
+            gate_output=$(bash -c "$cmd" 2>&1 | tail -50)
             local gate_exit_code=${PIPESTATUS[0]}
 
             echo "$gate_output" | tail -20
@@ -751,7 +830,11 @@ run_iteration_checks() {
             [[ "$cmd" == *"agent-browser"* ]] && continue
 
             log_info "Running informational gate: $cmd"
-            if ! eval "$cmd" 2>&1 | tail -10; then
+            if ! validate_command "$cmd"; then
+                log_warn "Informational gate rejected (unsafe command): $cmd"
+                continue
+            fi
+            if ! bash -c "$cmd" 2>&1 | tail -10; then
                 log_warn "Informational gate failed (non-blocking): $cmd"
             fi
         done < <(get_spec_informational_commands "$spec_file")
@@ -772,7 +855,10 @@ run_iteration_checks() {
         test_cmd=$(get_project_config "commands.test")
         if [[ -n "$test_cmd" ]]; then
             log_info "Running discovered test command: $test_cmd"
-            if ! eval "CI=true $test_cmd" 2>&1 | tail -20; then
+            if ! validate_command "$test_cmd"; then
+                ITERATION_ISSUES+=("Tests rejected (unsafe command): $test_cmd")
+                all_passed=false
+            elif ! bash -c "CI=true $test_cmd" 2>&1 | tail -20; then
                 ITERATION_ISSUES+=("Tests failed")
                 all_passed=false
             fi
@@ -783,7 +869,10 @@ run_iteration_checks() {
             if grep -q '"lint"' package.json 2>/dev/null; then
                 local lint_cmd="$pkg_manager run lint"
                 log_info "Running discovered lint command: $lint_cmd"
-                if ! eval "$lint_cmd" 2>&1 | tail -10; then
+                if ! validate_command "$lint_cmd"; then
+                    ITERATION_ISSUES+=("Lint rejected (unsafe command): $lint_cmd")
+                    all_passed=false
+                elif ! bash -c "$lint_cmd" 2>&1 | tail -10; then
                     ITERATION_ISSUES+=("Lint failed")
                     all_passed=false
                 fi
@@ -1686,6 +1775,7 @@ discover_quality_commands() {
 
         *)
             # Unknown project type - try common commands
+            # || true prevents failure when npm test script doesn't exist
             if [[ -f "package.json" ]]; then
                 quality_commands+=("npm test 2>/dev/null || true")
             fi
@@ -1715,9 +1805,16 @@ run_quality_gates() {
 
         log_info "Gate: $cmd"
 
+        # Validate command before execution
+        if ! validate_command "$cmd"; then
+            log_error "Gate REJECTED (unsafe command): $cmd"
+            failed=1
+            continue
+        fi
+
         # Run command and capture output
         set +e
-        gate_output=$(eval "$cmd" 2>&1)
+        gate_output=$(bash -c "$cmd" 2>&1)
         local exit_code=$?
         set -e
 
@@ -1795,7 +1892,10 @@ verify_integration() {
     db_cmd=$(get_project_config "commands.db")
     if [[ -n "$db_cmd" ]]; then
         log_info "Running database setup: $db_cmd"
-        if ! eval "$db_cmd" 2>/dev/null; then
+        if ! validate_command "$db_cmd"; then
+            INTEGRATION_FAILURES+=("Database setup rejected (unsafe command): $db_cmd")
+            all_passed=false
+        elif ! bash -c "$db_cmd" 2>/dev/null; then
             INTEGRATION_FAILURES+=("Database setup failed: $db_cmd")
             all_passed=false
         fi
@@ -1815,8 +1915,13 @@ verify_integration() {
             [[ "$cmd" == *"agent-browser"* ]] && continue
 
             log_info "Running SPEC test: $cmd"
+            if ! validate_command "$cmd"; then
+                INTEGRATION_FAILURES+=("Tests rejected (unsafe command): $cmd")
+                all_passed=false
+                continue
+            fi
             tests_run=$((tests_run + 1))
-            if ! eval "CI=true $cmd" 2>&1 | tail -20; then
+            if ! bash -c "CI=true $cmd" 2>&1 | tail -20; then
                 INTEGRATION_FAILURES+=("Tests failed: $cmd")
                 all_passed=false
             fi
@@ -1829,7 +1934,10 @@ verify_integration() {
         test_cmd=$(get_project_config "commands.test")
         if [[ -n "$test_cmd" ]]; then
             log_info "Running tests: $test_cmd"
-            if ! eval "CI=true $test_cmd" 2>/dev/null; then
+            if ! validate_command "$test_cmd"; then
+                INTEGRATION_FAILURES+=("Tests rejected (unsafe command): $test_cmd")
+                all_passed=false
+            elif ! bash -c "CI=true $test_cmd" 2>/dev/null; then
                 INTEGRATION_FAILURES+=("Tests failed: $test_cmd")
                 all_passed=false
             fi
@@ -1855,45 +1963,52 @@ verify_integration() {
         local e2e_temp
         e2e_temp=$(mktemp)
 
-        # Run with CI=true to disable interactive features
-        eval "CI=true $test_e2e_cmd" > "$e2e_temp" 2>&1 || e2e_exit_code=$?
+        # Validate e2e command before execution
+        if ! validate_command "$test_e2e_cmd"; then
+            INTEGRATION_FAILURES+=("E2E tests rejected (unsafe command): $test_e2e_cmd")
+            all_passed=false
+            rm -f "$e2e_temp"
+        else
+            # Run with CI=true to disable interactive features
+            bash -c "CI=true $test_e2e_cmd" > "$e2e_temp" 2>&1 || e2e_exit_code=$?
 
-        e2e_output=$(cat "$e2e_temp")
-        rm -f "$e2e_temp"
+            e2e_output=$(cat "$e2e_temp")
+            rm -f "$e2e_temp"
 
-        # Strip ANSI escape codes for reliable pattern matching
-        local e2e_clean
-        e2e_clean=$(echo "$e2e_output" | sed 's/\x1b\[[0-9;]*m//g' | sed 's/\x1b\[[0-9]*[A-Za-z]//g')
+            # Strip ANSI escape codes for reliable pattern matching
+            local e2e_clean
+            e2e_clean=$(echo "$e2e_output" | sed 's/\x1b\[[0-9;]*m//g' | sed 's/\x1b\[[0-9]*[A-Za-z]//g')
 
-        # Show summary of e2e results
-        local passed_line failed_line
-        passed_line=$(echo "$e2e_clean" | grep -oE "[0-9]+ passed" | head -1 || true)
-        failed_line=$(echo "$e2e_clean" | grep -oE "[0-9]+ failed" | head -1 || true)
+            # Show summary of e2e results
+            local passed_line failed_line
+            passed_line=$(echo "$e2e_clean" | grep -oE "[0-9]+ passed" | head -1 || true)
+            failed_line=$(echo "$e2e_clean" | grep -oE "[0-9]+ failed" | head -1 || true)
 
-        if [[ -n "$passed_line" ]] || [[ -n "$failed_line" ]]; then
-            log_info "E2E results: ${passed_line:-0 passed}, ${failed_line:-0 failed}"
-        fi
+            if [[ -n "$passed_line" ]] || [[ -n "$failed_line" ]]; then
+                log_info "E2E results: ${passed_line:-0 passed}, ${failed_line:-0 failed}"
+            fi
 
-        # Check for port conflict (dev server already running)
-        if echo "$e2e_clean" | grep -q "already used\|reuseExistingServer"; then
-            log_warn "E2E skipped: dev server already running (set reuseExistingServer:true in playwright.config)"
-            # Don't fail - this is a config issue, not a test failure
-        # Check if ANY tests passed (some browsers may not be installed)
-        elif [[ -n "$passed_line" ]]; then
-            local passed_count
-            passed_count=$(echo "$passed_line" | grep -oE "[0-9]+")
-            if [[ $passed_count -gt 0 ]]; then
-                log_info "E2E tests: $passed_count passed (some browsers may have failed - OK)"
+            # Check for port conflict (dev server already running)
+            if echo "$e2e_clean" | grep -q "already used\|reuseExistingServer"; then
+                log_warn "E2E skipped: dev server already running (set reuseExistingServer:true in playwright.config)"
+                # Don't fail - this is a config issue, not a test failure
+            # Check if ANY tests passed (some browsers may not be installed)
+            elif [[ -n "$passed_line" ]]; then
+                local passed_count
+                passed_count=$(echo "$passed_line" | grep -oE "[0-9]+")
+                if [[ $passed_count -gt 0 ]]; then
+                    log_info "E2E tests: $passed_count passed (some browsers may have failed - OK)"
+                else
+                    INTEGRATION_FAILURES+=("E2E tests failed - 0 tests passed")
+                    all_passed=false
+                fi
             else
-                INTEGRATION_FAILURES+=("E2E tests failed - 0 tests passed")
+                # No "passed" found - show what we got for debugging
+                log_warn "E2E output (last 5 lines):"
+                echo "$e2e_clean" | tail -5
+                INTEGRATION_FAILURES+=("E2E tests failed - no tests passed")
                 all_passed=false
             fi
-        else
-            # No "passed" found - show what we got for debugging
-            log_warn "E2E output (last 5 lines):"
-            echo "$e2e_clean" | tail -5
-            INTEGRATION_FAILURES+=("E2E tests failed - no tests passed")
-            all_passed=false
         fi
     fi
 
@@ -1902,7 +2017,10 @@ verify_integration() {
     build_cmd=$(get_project_config "commands.build")
     if [[ -n "$build_cmd" ]]; then
         log_info "Verifying build: $build_cmd"
-        if ! eval "$build_cmd" 2>/dev/null; then
+        if ! validate_command "$build_cmd"; then
+            INTEGRATION_FAILURES+=("Build rejected (unsafe command): $build_cmd")
+            all_passed=false
+        elif ! bash -c "$build_cmd" 2>/dev/null; then
             INTEGRATION_FAILURES+=("Build failed: $build_cmd")
             all_passed=false
         fi
