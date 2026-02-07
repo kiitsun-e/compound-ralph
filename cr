@@ -855,10 +855,11 @@ run_iteration_checks() {
         test_cmd=$(get_project_config "commands.test")
         if [[ -n "$test_cmd" ]]; then
             log_info "Running discovered test command: $test_cmd"
-            if ! validate_command "$test_cmd"; then
+            local exec_cmd="CI=true $test_cmd"
+            if ! validate_command "$exec_cmd"; then
                 ITERATION_ISSUES+=("Tests rejected (unsafe command): $test_cmd")
                 all_passed=false
-            elif ! bash -c "CI=true $test_cmd" 2>&1 | tail -20; then
+            elif ! bash -c "$exec_cmd" 2>&1 | tail -20; then
                 ITERATION_ISSUES+=("Tests failed")
                 all_passed=false
             fi
@@ -1915,13 +1916,14 @@ verify_integration() {
             [[ "$cmd" == *"agent-browser"* ]] && continue
 
             log_info "Running SPEC test: $cmd"
-            if ! validate_command "$cmd"; then
+            local exec_cmd="CI=true $cmd"
+            if ! validate_command "$exec_cmd"; then
                 INTEGRATION_FAILURES+=("Tests rejected (unsafe command): $cmd")
                 all_passed=false
                 continue
             fi
             tests_run=$((tests_run + 1))
-            if ! bash -c "CI=true $cmd" 2>&1 | tail -20; then
+            if ! bash -c "$exec_cmd" 2>&1 | tail -20; then
                 INTEGRATION_FAILURES+=("Tests failed: $cmd")
                 all_passed=false
             fi
@@ -1934,10 +1936,11 @@ verify_integration() {
         test_cmd=$(get_project_config "commands.test")
         if [[ -n "$test_cmd" ]]; then
             log_info "Running tests: $test_cmd"
-            if ! validate_command "$test_cmd"; then
+            local exec_cmd="CI=true $test_cmd"
+            if ! validate_command "$exec_cmd"; then
                 INTEGRATION_FAILURES+=("Tests rejected (unsafe command): $test_cmd")
                 all_passed=false
-            elif ! bash -c "CI=true $test_cmd" 2>/dev/null; then
+            elif ! bash -c "$exec_cmd" 2>/dev/null; then
                 INTEGRATION_FAILURES+=("Tests failed: $test_cmd")
                 all_passed=false
             fi
@@ -1964,13 +1967,14 @@ verify_integration() {
         e2e_temp=$(mktemp)
 
         # Validate e2e command before execution
-        if ! validate_command "$test_e2e_cmd"; then
+        local exec_cmd="CI=true $test_e2e_cmd"
+        if ! validate_command "$exec_cmd"; then
             INTEGRATION_FAILURES+=("E2E tests rejected (unsafe command): $test_e2e_cmd")
             all_passed=false
             rm -f "$e2e_temp"
         else
             # Run with CI=true to disable interactive features
-            bash -c "CI=true $test_e2e_cmd" > "$e2e_temp" 2>&1 || e2e_exit_code=$?
+            bash -c "$exec_cmd" > "$e2e_temp" 2>&1 || e2e_exit_code=$?
 
             e2e_output=$(cat "$e2e_temp")
             rm -f "$e2e_temp"
