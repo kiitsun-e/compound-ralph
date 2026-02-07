@@ -2299,6 +2299,22 @@ UNKNOWN
 #=============================================================================
 
 cmd_init() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr init [path]
+
+Initialize Compound Ralph in a project directory. Creates specs/, plans/,
+knowledge/ directories, generates AGENTS.md, and discovers project config.
+
+Arguments:
+    path    Project directory (defaults to current directory)
+
+Examples:
+    cr init                    # Initialize in current directory
+    cr init ~/projects/myapp   # Initialize in specific directory
+HELP
+        return 0
+    fi
     local project_path="${1:-.}"
     project_path="$(cd "$project_path" && pwd)"
 
@@ -2361,6 +2377,25 @@ cmd_init() {
 #=============================================================================
 
 cmd_converse() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr converse <topic>
+
+Start a Socratic dialogue to explore ideas before committing to a plan.
+Surfaces assumptions, examines trade-offs, and saves a decision record.
+
+Arguments:
+    topic    The topic to explore (required)
+
+Output:
+    knowledge/decisions/<date>-<topic>.md
+
+Examples:
+    cr converse "user authentication approach"
+    cr converse "monorepo vs polyrepo"
+HELP
+        return 0
+    fi
     local topic="$*"
 
     if [[ -z "$topic" ]]; then
@@ -2466,6 +2501,25 @@ cmd_converse() {
 #=============================================================================
 
 cmd_research() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr research <topic>
+
+Deep investigation of a topic before building. Analyzes codebase patterns,
+researches best practices, and assesses feasibility.
+
+Arguments:
+    topic    The topic to research (required)
+
+Output:
+    knowledge/research/<date>-<topic>.md
+
+Examples:
+    cr research "oauth implementation best practices"
+    cr research "database migration strategy"
+HELP
+        return 0
+    fi
     local topic="$*"
 
     if [[ -z "$topic" ]]; then
@@ -2567,6 +2621,25 @@ cmd_research() {
 #=============================================================================
 
 cmd_plan() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr plan <description>
+
+Create a plan interactively with Claude. Incorporates any prior knowledge
+from converse/research phases. Type /deepen-plan to enrich with research.
+
+Arguments:
+    description    Feature description (required)
+
+Output:
+    plans/<feature-name>.md
+
+Examples:
+    cr plan "add dark mode support"
+    cr plan "refactor authentication to use JWT"
+HELP
+        return 0
+    fi
     local description="$*"
 
     if [[ -z "$description" ]]; then
@@ -2671,6 +2744,26 @@ decisions, risks, and recommendations from the research/conversation phases."
 #=============================================================================
 
 cmd_spec() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr spec <plan-file>
+
+Convert a plan into a structured SPEC with tasks, quality gates, and
+exit criteria. Creates a spec directory with SPEC.md and PROMPT.md.
+
+Arguments:
+    plan-file    Path to a plan markdown file (required)
+
+Output:
+    specs/<feature-name>/SPEC.md
+    specs/<feature-name>/PROMPT.md
+
+Examples:
+    cr spec plans/user-authentication.md
+    cr spec plans/dark-mode.md
+HELP
+        return 0
+    fi
     local plan_file="$1"
 
     if [[ -z "$plan_file" ]] || [[ ! -f "$plan_file" ]]; then
@@ -2990,6 +3083,29 @@ PROMPT
 #=============================================================================
 
 cmd_implement() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr implement [spec-dir] [--json] [--non-interactive]
+
+Start the autonomous implementation loop. Reads SPEC.md, executes one
+task per iteration with quality gate backpressure.
+
+Options:
+    spec-dir            Path to spec directory (auto-detected if omitted)
+    --json              Output JSON summary on completion/failure
+    --non-interactive   Auto-confirm prompts (for CI/agent use)
+
+Environment:
+    MAX_ITERATIONS=50   Maximum loop iterations
+    ITERATION_DELAY=3   Seconds between iterations
+
+Examples:
+    cr implement                        # Auto-find active spec
+    cr implement specs/dark-mode/       # Specific spec
+    MAX_ITERATIONS=100 cr implement     # Override max iterations
+HELP
+        return 0
+    fi
     local spec_dir="${1:-}"
 
     # If no spec dir provided, find one with status: building or pending
@@ -3455,6 +3571,29 @@ Start by investigating the first failure: ${INTEGRATION_FAILURES[0]}"
 #=============================================================================
 
 cmd_review() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr review [spec-dir] [options]
+
+Run code and/or design review on a spec. Creates todo files with
+actionable findings. Use 'cr fix' to address them.
+
+Options:
+    spec-dir              Path to spec directory (auto-detected if omitted)
+    --design              Include design review alongside code review
+    --design-only         Run only design review
+    --url URL             URL for design review screenshots
+    --team                Use multi-agent team review
+    --team-model MODEL    Model for team agents (default: same as main)
+    --dry-run             Show review plan without executing
+
+Examples:
+    cr review                           # Code review, auto-find spec
+    cr review specs/auth/ --design      # Code + design review
+    cr review --design-only --url http://localhost:3000
+HELP
+        return 0
+    fi
     local spec_dir=""
     local review_type="code"  # code, design, or both
     local design_url=""
@@ -3818,6 +3957,24 @@ SPEC FILE: $abs_spec_dir/SPEC.md"
 #=============================================================================
 
 cmd_fix() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr fix [code|design] [spec-dir]
+
+Create a fix spec from review findings. Converts todo files into
+an actionable spec that 'cr implement' can execute.
+
+Arguments:
+    code|design    Fix only code or design issues (default: both)
+    spec-dir       Path to spec directory (auto-detected if omitted)
+
+Examples:
+    cr fix                          # Fix all issues, auto-find spec
+    cr fix code                     # Fix only code review issues
+    cr fix design specs/auth/       # Fix design issues for specific spec
+HELP
+        return 0
+    fi
     local fix_type=""
     local spec_dir=""
 
@@ -4102,6 +4259,19 @@ FIXPROMPT
 
 # Legacy alias for backwards compatibility
 cmd_spec_from_todos() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr spec-from-todos (DEPRECATED)
+
+This command is deprecated. Use 'cr fix' instead.
+
+New workflow:
+    cr review specs/my-feature/    # Run review
+    cr fix code                    # Create fix spec
+    cr implement                   # Implement fixes
+HELP
+        return 0
+    fi
     log_warn "spec-from-todos is deprecated. Use 'cr fix' instead."
     log_info "Converting to new format..."
     echo ""
@@ -4122,6 +4292,26 @@ cmd_spec_from_todos() {
 #=============================================================================
 
 cmd_compound() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr compound [feature]
+
+Extract and preserve learnings from a completed feature. Captures
+decisions, patterns, and mistakes to make future work easier.
+
+Arguments:
+    feature    Feature name to extract learnings from (optional)
+
+Output:
+    knowledge/learnings/<date>-<feature>.md
+    knowledge/patterns/<date>-<pattern>.md
+
+Examples:
+    cr compound                     # Extract from recent work
+    cr compound "user-auth"         # Extract from specific feature
+HELP
+        return 0
+    fi
     local feature="$*"
 
     log_step "COMPOUND: Extract and Preserve Learnings"
@@ -4292,6 +4482,26 @@ detect_dev_server() {
 }
 
 cmd_design() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr design [url] [--n N] [--continue]
+
+Autonomous design improvement loop. Screenshots pages, applies
+design improvements, and iterates until all pages are polished.
+
+Options:
+    url           Dev server URL (auto-detected if omitted)
+    --n N         Force exactly N iterations (default: auto until done)
+    --continue    Resume a previous design session
+
+Examples:
+    cr design                              # Auto-detect dev server
+    cr design http://localhost:3000        # Specific URL
+    cr design http://localhost:5173 --n 5  # Limit to 5 iterations
+    cr design --continue                   # Resume last session
+HELP
+        return 0
+    fi
     local url=""
     local max_iterations=50  # Safety limit
     local force_iterations=false
@@ -4599,6 +4809,21 @@ If issues were introduced, fix them. If improvements were made, maintain them.
 #=============================================================================
 
 cmd_status() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr status [--json]
+
+Show status of all specs: name, status, iteration count, and task progress.
+
+Options:
+    --json    Output as JSON array (for scripting/agent use)
+
+Examples:
+    cr status              # Table output
+    cr status --json       # JSON output
+HELP
+        return 0
+    fi
     if [[ ! -d "$SPECS_DIR" ]]; then
         if [[ "$JSON_OUTPUT" == "true" ]]; then
             echo "[]"
@@ -4686,6 +4911,26 @@ cmd_status() {
 #=============================================================================
 
 cmd_learnings() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr learnings [category] [limit]
+
+Display accumulated project learnings from implementation iterations.
+
+Arguments:
+    category    Filter by category (optional)
+    limit       Max entries to show (default: 20)
+
+Categories:
+    environment, pattern, gotcha, fix, discovery, iteration_failure
+
+Examples:
+    cr learnings                    # Show all (last 20)
+    cr learnings gotcha             # Show gotchas only
+    cr learnings pattern 50         # Show 50 patterns
+HELP
+        return 0
+    fi
     local category="${1:-}"
     local limit="${2:-20}"
 
@@ -4716,6 +4961,21 @@ cmd_learnings() {
 #=============================================================================
 
 cmd_reset_context() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr reset-context <spec-dir>
+
+Reset accumulated context in a spec's PROMPT.md. Use when the agent
+has learned harmful patterns (e.g., skipping quality gates).
+
+Arguments:
+    spec-dir    Path to the spec directory (required)
+
+Examples:
+    cr reset-context specs/my-feature/
+HELP
+        return 0
+    fi
     local spec_dir="${1:-}"
 
     if [[ -z "$spec_dir" ]]; then
@@ -4818,6 +5078,28 @@ cmd_reset_context() {
 #=============================================================================
 
 cmd_test_gen() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr test-gen <spec-file> [options]
+
+Generate E2E test files from a feature spec using Claude.
+
+Arguments:
+    spec-file               Path to SPEC.md file (required)
+
+Options:
+    -o, --output FILE       Output test file path (auto-derived if omitted)
+    --example-tests DIR     Directory with example tests (default: test/specs)
+    --dry-run               Show generated code without writing
+    --all                   Process all SPEC.md files in a directory
+
+Examples:
+    cr test-gen specs/onboarding/SPEC.md
+    cr test-gen specs/settings/SPEC.md -o test/specs/settings.e2e.js
+    cr test-gen specs/ --all --dry-run
+HELP
+        return 0
+    fi
     local spec_file=""
     local output_file=""
     local example_dir="test/specs"
@@ -5054,6 +5336,24 @@ cmd_test_gen() {
 #=============================================================================
 
 cmd_init_tests() {
+    if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
+        cat << 'HELP'
+Usage: cr init-tests [--force] [--test-dir DIR]
+
+Set up WebdriverIO E2E testing infrastructure for Tauri apps.
+Creates wdio.conf.js, example test, and helper utilities.
+
+Options:
+    --force, -f       Overwrite existing wdio.conf.js
+    --test-dir DIR    Test directory (default: test/e2e)
+
+Examples:
+    cr init-tests                       # Set up with defaults
+    cr init-tests --force               # Overwrite existing config
+    cr init-tests --test-dir test/e2e   # Custom test directory
+HELP
+        return 0
+    fi
     local project_type="tauri"  # Currently only supports Tauri apps
     local test_dir="test/e2e"
     local force=false
