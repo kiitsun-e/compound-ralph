@@ -43,6 +43,12 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
 
+# NO_COLOR support (https://no-color.org/)
+# Disable colors if NO_COLOR is set or stdout is not a terminal
+if [[ -n "${NO_COLOR:-}" ]] || ! [[ -t 1 ]]; then
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' NC='' BOLD=''
+fi
+
 # Configuration
 CR_VERSION="2.1.0"
 CR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,6 +60,29 @@ MAX_RETRIES="${MAX_RETRIES:-3}"
 RETRY_DELAY="${RETRY_DELAY:-5}"
 ITERATION_TIMEOUT="${ITERATION_TIMEOUT:-600}"  # 10 minutes per iteration
 MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-3}"
+
+# Agent/machine invocation flags
+NON_INTERACTIVE=false
+JSON_OUTPUT=false
+
+# Emit a JSON summary for --json mode in cmd_implement and exit
+# Usage: json_exit status iterations spec_file exit_code
+emit_json_result() {
+    local status="$1" iterations="$2" spec="$3" exit_code="$4"
+    if [[ "$JSON_OUTPUT" != "true" ]]; then
+        return
+    fi
+    local learnings_count=0
+    if [[ -f ".cr/learnings.json" ]] && command -v jq &>/dev/null; then
+        learnings_count=$(jq 'length' .cr/learnings.json 2>/dev/null || echo 0)
+    fi
+    local json="{\"status\":\"$status\",\"iterations\":$iterations,\"spec\":\"$spec\",\"learnings\":$learnings_count}"
+    if command -v jq &>/dev/null; then
+        echo "$json" | jq .
+    else
+        echo "$json"
+    fi
+}
 
 # Track consecutive failures
 CONSECUTIVE_FAILURES=0
@@ -3274,8 +3303,12 @@ cmd_implement() {
     # Check if already complete
     if grep -q "status: complete" "$spec_file"; then
         log_warn "This spec is already marked complete."
-        read -p "Reset to 'building' and continue? [y/N] " -n 1 -r
-        echo
+        if [[ "$NON_INTERACTIVE" == "true" ]]; then
+            REPLY="y"
+        else
+            read -p "Reset to 'building' and continue? [y/N] " -n 1 -r
+            echo
+        fi
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             exit 0
         fi
@@ -3357,6 +3390,7 @@ cmd_implement() {
                 log_success "All tasks complete and verified!"
                 sed -i '' 's/status: building/status: complete/' "$spec_file" 2>/dev/null || \
                 sed -i 's/status: building/status: complete/' "$spec_file"
+                emit_json_result "complete" "$iteration" "$spec_file" 0
                 echo ""
                 echo "Next steps:"
                 echo "  1. Review changes: git diff main"
@@ -3497,6 +3531,7 @@ Start by reading both files now."
                 log_error "  - Rate limiting"
                 echo ""
                 log_info "Resume when ready: cr implement $spec_dir"
+                emit_json_result "failed" "$iteration" "$spec_file" 1
                 exit 1
             fi
 
@@ -3620,6 +3655,7 @@ Start by reading both files now."
                 # Update spec status
                 sed -i '' 's/status: building/status: complete/' "$spec_file"
 
+                emit_json_result "complete" "$iteration" "$spec_file" 0
                 echo ""
                 echo "Next steps:"
                 echo "  1. Review changes: git diff main"
@@ -3669,6 +3705,7 @@ Start by investigating the first failure: ${INTEGRATION_FAILURES[0]}"
         if grep -q "status: complete" "$spec_file"; then
             echo ""
             log_success "Spec marked complete after $iteration iterations!"
+            emit_json_result "complete" "$iteration" "$spec_file" 0
             exit 0
         fi
 
@@ -3679,6 +3716,7 @@ Start by investigating the first failure: ${INTEGRATION_FAILURES[0]}"
 
     echo ""
     log_warn "Max iterations ($MAX_ITERATIONS) reached without completion."
+    emit_json_result "max_iterations" "$iteration" "$spec_file" 1
     echo ""
     echo "Options:"
     echo "  1. Review SPEC.md to see current progress"
@@ -5316,17 +5354,23 @@ Start by reading $state_file to find your target page/view for this iteration."
 #=============================================================================
 
 cmd_status() {
-    log_step "Compound Ralph Status"
-
     if [[ ! -d "$SPECS_DIR" ]]; then
+        if [[ "$JSON_OUTPUT" == "true" ]]; then
+            echo "[]"
+            exit 0
+        fi
         log_warn "No specs directory found. Run 'cr init' first."
         exit 0
     fi
 
     local specs_found=0
+    local json_entries=()
 
-    echo "Spec                          Status      Iterations  Tasks"
-    echo "----                          ------      ----------  -----"
+    if [[ "$JSON_OUTPUT" != "true" ]]; then
+        log_step "Compound Ralph Status"
+        echo "Spec                          Status      Iterations  Tasks"
+        echo "----                          ------      ----------  -----"
+    fi
 
     for spec_file in "$SPECS_DIR"/*/SPEC.md; do
         [[ -f "$spec_file" ]] || continue
@@ -5350,23 +5394,46 @@ cmd_status() {
         pending=${pending:-0}
         completed=${completed:-0}
 
-        # Color-code status
-        local status_display
-        case "$status" in
-            complete)  status_display="${GREEN}$status${NC}" ;;
-            building)  status_display="${YELLOW}$status${NC}" ;;
-            blocked)   status_display="${RED}$status${NC}" ;;
-            *)         status_display="$status" ;;
-        esac
+        if [[ "$JSON_OUTPUT" == "true" ]]; then
+            json_entries+=("{\"name\":\"$spec_name\",\"status\":\"$status\",\"dir\":\"$spec_dir\",\"pending_tasks\":$pending,\"completed_tasks\":$completed,\"total_iterations\":$iteration_count}")
+        else
+            # Color-code status
+            local status_display
+            case "$status" in
+                complete)  status_display="${GREEN}$status${NC}" ;;
+                building)  status_display="${YELLOW}$status${NC}" ;;
+                blocked)   status_display="${RED}$status${NC}" ;;
+                *)         status_display="$status" ;;
+            esac
 
-        printf "%-30s %-18b %-12s %s/%s\n" "$spec_name" "$status_display" "$iteration_count" "$completed" "$((completed + pending))"
+            printf "%-30s %-18b %-12s %s/%s\n" "$spec_name" "$status_display" "$iteration_count" "$completed" "$((completed + pending))"
+        fi
     done
 
-    if [[ $specs_found -eq 0 ]]; then
-        echo "(no specs found)"
-    fi
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        local json_array="["
+        local first=true
+        for entry in "${json_entries[@]}"; do
+            if [[ "$first" == "true" ]]; then
+                first=false
+            else
+                json_array+=","
+            fi
+            json_array+="$entry"
+        done
+        json_array+="]"
 
-    echo ""
+        if command -v jq &>/dev/null; then
+            echo "$json_array" | jq .
+        else
+            echo "$json_array"
+        fi
+    else
+        if [[ $specs_found -eq 0 ]]; then
+            echo "(no specs found)"
+        fi
+        echo ""
+    fi
 }
 
 #=============================================================================
@@ -5797,8 +5864,12 @@ cmd_init_tests() {
     # Check for Tauri project
     if [[ ! -d "src-tauri" ]]; then
         log_warn "No src-tauri directory found. This command is designed for Tauri apps."
-        read -p "Continue anyway? [y/N] " -n 1 -r
-        echo
+        if [[ "$NON_INTERACTIVE" == "true" ]]; then
+            REPLY="y"
+        else
+            read -p "Continue anyway? [y/N] " -n 1 -r
+            echo
+        fi
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             exit 1
         fi
@@ -6020,6 +6091,8 @@ COMMANDS:
                         Auto-detects quality gates
 
     implement [spec]    Start autonomous implementation loop
+        [--json]        Output final JSON summary on completion/failure
+        [--non-interactive] Auto-confirm all prompts (for CI/agent use)
                         Reads SPEC.md, executes one task per iteration
                         Runs backpressure (tests, lint) each iteration
                         Auto-detects fix specs (fixes/code, fixes/design)
@@ -6076,6 +6149,7 @@ COMMANDS:
                         Saves screenshots to design-iterations/
 
     status              Show progress of all specs (including fixes)
+        [--json]        Output spec status as JSON array
 
     learnings [cat]     View project learnings from .cr/learnings.json
         [limit]         Number of entries to show (default: 20)
@@ -6128,7 +6202,13 @@ WORKFLOW:
    13. cr implement                      # Fix design issues
    14. cr review                         # Verify clean
 
+GLOBAL FLAGS:
+    --non-interactive   Auto-confirm all interactive prompts (for CI/agent use)
+    --json              Output machine-readable JSON (implies NO_COLOR)
+                        Supported by: status, implement
+
 ENVIRONMENT VARIABLES:
+    NO_COLOR            Disable colored output (https://no-color.org/)
     MAX_ITERATIONS      Maximum loop iterations (default: 50)
     ITERATION_DELAY     Seconds between iterations (default: 3)
     MAX_RETRIES         Retries per iteration on transient errors (default: 3)
@@ -6167,6 +6247,22 @@ HELP
 main() {
     check_prerequisites
     migrate_borg_to_cr
+
+    # Parse global flags before command dispatch
+    local args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --non-interactive) NON_INTERACTIVE=true ;;
+            --json) JSON_OUTPUT=true ;;
+            *) args+=("$arg") ;;
+        esac
+    done
+    set -- "${args[@]+"${args[@]}"}"
+
+    # --json implies NO_COLOR
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        RED='' GREEN='' YELLOW='' BLUE='' CYAN='' NC='' BOLD=''
+    fi
 
     local command="${1:-help}"
     shift || true
