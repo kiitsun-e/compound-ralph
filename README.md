@@ -8,6 +8,8 @@ Autonomous feature implementation system combining compound-engineering's rich p
 
 The key insight: **fresh context per iteration + file-based state + quality gate backpressure**. Each iteration starts with a clean context window, reads the current state from SPEC.md, does one task, runs all quality gates (tests, lint, types, build), and writes results back. If something breaks, the next iteration sees the failure and self-corrects.
 
+Each unit of engineering work should make subsequent units easier.
+
 You handle the thinking (converse, research, plan). The machine handles the building (implement loop). File-based state is the bridge.
 
 ## Installation
@@ -99,7 +101,7 @@ cr compound user-authentication
 ```
 
 ```
-CONVERSE -> RESEARCH -> PLAN -> SPEC -> IMPLEMENT -> REVIEW -> FIX -> COMPOUND
+CONVERSE → RESEARCH → PLAN → SPEC → IMPLEMENT → REVIEW → FIX → COMPOUND
 ```
 
 For a real-world walkthrough of this workflow in action, see [docs/workflow-example.md](docs/workflow-example.md).
@@ -111,59 +113,93 @@ For a real-world walkthrough of this workflow in action, see [docs/workflow-exam
 #### `cr init [path]`
 Initialize a project for Compound Ralph. Creates `specs/`, `plans/`, `knowledge/` directories and generates `AGENTS.md` with auto-detected build/test commands. Supports bun, npm, yarn, pnpm, rails, python, go, and rust.
 
+Flags: None
+
 #### `cr converse <topic>` (alias: `conv`)
 Start an exploratory Socratic dialogue about an idea before committing to a plan. Surfaces assumptions, explores alternatives, and clarifies trade-offs. Saves decision records to `knowledge/decisions/` for use in later planning.
+
+Flags: None
 
 #### `cr research <topic>` (alias: `res`)
 Deep investigation before planning. Analyzes codebase for existing patterns, researches best practices, assesses feasibility and risks with confidence levels. Saves reports to `knowledge/research/`.
 
+Flags: None
+
 #### `cr plan <description>`
 Create and enrich a feature plan using compound-engineering workflows. Automatically reads `knowledge/decisions/` and `knowledge/research/` from prior sessions. Runs `/workflows:plan` + `/deepen-plan` with 40+ parallel research agents.
+
+Flags: None
 
 #### `cr spec <plan-file>`
 Convert a plan to the SPEC.md format for autonomous implementation. Creates `specs/<feature>/` with SPEC.md (state file) and PROMPT.md (iteration instructions). Auto-detects quality gates based on project type.
 
+Flags: None
+
 #### `cr implement [spec-dir]` (aliases: `build`, `run`)
-Start the autonomous implementation loop. Reads SPEC.md, executes one task per iteration, runs all quality gates each iteration, updates state and commits progress. Continues until completion or max iterations. Supports `--json` and `--non-interactive` flags.
+Start the autonomous implementation loop. Reads SPEC.md, executes one task per iteration, runs all quality gates each iteration, updates state and commits progress. Continues until completion or max iterations.
+
+Flags: `--json`, `--non-interactive`
 
 #### `cr review [spec-dir]`
-Run comprehensive code review. Discovers issues and saves todos to `specs/<feature>/todos/code/`. Supports `--design` for visual review (uses agent-browser screenshots), `--design-only`, `--url` for custom dev server URL, and `--team` for parallel agent team review.
+Run comprehensive code review. Discovers issues and saves todos to `specs/<feature>/todos/code/`.
+
+Flags: `--design`, `--design-only`, `--url <url>`, `--team`
 
 #### `cr fix [type] [spec-dir]`
 Convert review todos into a fix spec. Use `cr fix code` for code issues only, `cr fix design` for design issues only, or `cr fix` for all. Creates fix specs under `specs/<feature>/fixes/`, then run `cr implement` to apply fixes.
 
+Flags: None
+
 #### `cr compound [feature]` (alias: `comp`)
 Extract and preserve learnings after implementation. Captures patterns, decisions, and pitfalls. Saves to `knowledge/learnings/` and `knowledge/patterns/`. Makes future features easier by compounding knowledge.
+
+Flags: None
 
 ### Testing
 
 #### `cr test-gen <spec>` (aliases: `testgen`, `tg`)
-Generate E2E tests from a feature spec. Reads SPEC.md and produces WebdriverIO test files using LLM to translate requirements into test code. Supports `--output`, `--example-tests`, `--dry-run`, and `--all` flags.
+Generate E2E tests from a feature spec. Reads SPEC.md and produces WebdriverIO test files using LLM to translate requirements into test code.
+
+Flags: `--output <path>`, `--example-tests <path>`, `--dry-run`, `--all`
 
 #### `cr init-tests` (alias: `init-e2e`)
-Set up WebdriverIO E2E testing infrastructure. Creates `wdio.conf.js`, test directory, and smoke test. Installs dependencies and adds npm scripts. Supports `--force` and `--test-dir` flags.
+Set up WebdriverIO E2E testing infrastructure. Creates `wdio.conf.js`, test directory, and smoke test. Installs dependencies and adds npm scripts.
+
+Flags: `--force`, `--test-dir <path>`
 
 ### Design
 
 #### `cr design [url]`
-Proactive design improvement loop. Auto-detects dev server, discovers all pages and SPA view states (nav links, keyboard shortcuts, tabs, sidebars), takes screenshots, and uses the `/frontend-design` skill for distinctive UI. Supports `--n N` to force exactly N iterations. Saves screenshots to `design-iterations/`.
+Proactive design improvement loop. Auto-detects dev server, discovers all pages and SPA view states (nav links, keyboard shortcuts, tabs, sidebars), takes screenshots, and uses the `/frontend-design` skill for distinctive UI. Saves screenshots to `design-iterations/`.
+
+Flags: `--n <count>`
 
 ### Utility
 
 #### `cr status`
-Show progress of all specs including fix specs. Displays status, iteration count, and task completion. Supports `--json` for machine-readable output.
+Show progress of all specs including fix specs. Displays status, iteration count, and task completion.
+
+Flags: `--json`
 
 #### `cr learnings [category] [limit]`
 View project learnings from `.cr/learnings.json`. Categories: environment, pattern, gotcha, fix, discovery. Default limit: 20.
 
+Flags: None
+
 #### `cr reset-context <spec-dir>`
 Reset accumulated context for a stuck spec. Use when the agent has learned harmful patterns (e.g., dismissing errors as "pre-existing"). Clears bad learnings and allows a fresh start.
+
+Flags: None
 
 #### `cr help`
 Show full usage information with all commands, flags, and workflow examples.
 
+Flags: None
+
 #### `cr version`
 Print the current version.
+
+Flags: None
 
 ## Workflow Phases
 
@@ -255,28 +291,28 @@ Each iteration follows this cycle:
 │    - Check iteration log for learnings                      │
 │    - Study key files                                        │
 └─────────────────────────────────────────────────────────────┘
-                            |
+                            ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ 2. SELECT - Pick ONE task                                   │
 │    - Continue "In Progress" if exists                       │
 │    - Otherwise pick highest priority "Pending"              │
 │    - Move to "In Progress" BEFORE starting                  │
 └─────────────────────────────────────────────────────────────┘
-                            |
+                            ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ 3. INVESTIGATE - Don't assume not implemented               │
 │    - Search codebase for existing implementations           │
 │    - Check if task is partially done                        │
 │    - Update notes with discoveries                          │
 └─────────────────────────────────────────────────────────────┘
-                            |
+                            ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ 4. IMPLEMENT - Execute the task                             │
 │    - Follow patterns from Context section                   │
 │    - Write tests alongside (not after)                      │
 │    - Keep focused on ONE task                               │
 └─────────────────────────────────────────────────────────────┘
-                            |
+                            ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ 5. VALIDATE - Run backpressure                              │
 │    - bun test                                               │
@@ -285,7 +321,7 @@ Each iteration follows this cycle:
 │    - bun run build                                          │
 │    - Fix issues before continuing                           │
 └─────────────────────────────────────────────────────────────┘
-                            |
+                            ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ 6. UPDATE - Record progress                                 │
 │    - Move task to "Completed"                               │
@@ -293,13 +329,13 @@ Each iteration follows this cycle:
 │    - Update iteration count                                 │
 │    - Add to Iteration Log                                   │
 └─────────────────────────────────────────────────────────────┘
-                            |
+                            ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ 7. COMMIT & CHECK - Save and evaluate                       │
 │    - git commit meaningful progress                         │
 │    - Check all exit criteria                                │
-│    - If ALL met -> output completion promise                │
-│    - If not -> next iteration continues                     │
+│    - If ALL met → output completion promise                 │
+│    - If not → next iteration continues                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -356,7 +392,7 @@ The loop automatically recovers from transient errors:
 
 When an error occurs:
 1. Waits `RETRY_DELAY` seconds (default: 5s)
-2. Retries with exponential backoff (5s -> 10s -> 20s)
+2. Retries with exponential backoff (5s → 10s → 20s)
 3. After `MAX_RETRIES` failures, skips to next iteration
 4. Loop continues - no human intervention needed
 
@@ -417,6 +453,17 @@ Don't micro-manage. If backpressure is set up correctly:
 - [docs/workflow-example.md](docs/workflow-example.md) - Real-world walkthrough of a full feature implementation
 - [docs/backpressure.md](docs/backpressure.md) - Deep dive into the backpressure concept
 - [docs/prompting-patterns.md](docs/prompting-patterns.md) - Prompt engineering patterns used in cr
+
+## Troubleshooting
+
+### Loop stops early
+Check SPEC.md — are all exit criteria achievable? Are there blocked tasks? Check `.history/` logs.
+
+### Same error repeating
+Add the error pattern to the Notes section of SPEC.md. The next iteration will see the learning and adapt.
+
+### Context seems lost between iterations
+This is by design. Each iteration gets fresh context. Information persists via SPEC.md (state), AGENTS.md (commands), git history (changes), and Notes section (learnings).
 
 ## Sources & Inspiration
 
