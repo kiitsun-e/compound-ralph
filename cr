@@ -115,6 +115,36 @@ log_step() {
     echo -e "\n${CYAN}${BOLD}=== $1 ===${NC}\n"
 }
 
+# Load a prompt file from the prompts/ directory.
+# Prompts were previously inline for single-file portability but were extracted
+# to separate files for maintainability. Prompt files must be co-located with
+# the cr script (i.e. in $CR_DIR/prompts/).
+# Placeholders use __DOUBLE_UNDERSCORE__ convention to avoid collision with prompt content
+load_prompt() {
+    local filename="$1"
+    local filepath="$CR_DIR/prompts/$filename"
+    if [[ ! -f "$filepath" ]]; then
+        log_error "Prompt file not found: $filepath"
+        log_error "Ensure prompt files are co-located with the cr script in $CR_DIR/prompts/"
+        exit 1
+    fi
+    cat "$filepath"
+}
+
+# Warn if unreplaced __PLACEHOLDER__ tokens remain after substitution
+validate_prompt() {
+    local prompt_text="$1"
+    local prompt_name="$2"
+    local leftover
+    leftover=$(echo "$prompt_text" | grep -o '__[A-Z_]*__' | sort -u || true)
+    if [[ -n "$leftover" ]]; then
+        log_warn "Unreplaced placeholders in $prompt_name prompt:"
+        echo "$leftover" | while read -r token; do
+            log_warn "  $token"
+        done
+    fi
+}
+
 # Run Claude with retry logic and timeout
 # Returns 0 on success, 1 on permanent failure
 run_claude_with_retry() {
@@ -2320,7 +2350,7 @@ cmd_converse() {
     echo ""
 
     local converse_prompt
-    converse_prompt=$(cat "$CR_DIR/prompts/converse.txt")
+    converse_prompt=$(load_prompt "converse.txt")
     converse_prompt="${converse_prompt//__TOPIC__/$topic}"
     converse_prompt="${converse_prompt//__VISION_CONTEXT__/$vision_context}"
     converse_prompt="${converse_prompt//__CLAUDE_MD_CONTEXT__/$claude_md_context}"
@@ -2328,6 +2358,7 @@ cmd_converse() {
     converse_prompt="${converse_prompt//__EXISTING_RESEARCH__/$existing_research}"
     converse_prompt="${converse_prompt//__DECISION_FILE__/$decision_file}"
     converse_prompt="${converse_prompt//__DATE__/$(date '+%Y-%m-%d')}"
+    validate_prompt "$converse_prompt" "converse"
 
     # Run Claude interactively
     claude --dangerously-skip-permissions "$converse_prompt"
@@ -2421,13 +2452,14 @@ cmd_research() {
     echo ""
 
     local research_prompt
-    research_prompt=$(cat "$CR_DIR/prompts/research.txt")
+    research_prompt=$(load_prompt "research.txt")
     research_prompt="${research_prompt//__TOPIC__/$topic}"
     research_prompt="${research_prompt//__VISION_CONTEXT__/$vision_context}"
     research_prompt="${research_prompt//__CLAUDE_MD_CONTEXT__/$claude_md_context}"
     research_prompt="${research_prompt//__EXISTING_DECISIONS__/$existing_decisions}"
     research_prompt="${research_prompt//__EXISTING_RESEARCH__/$existing_research}"
     research_prompt="${research_prompt//__REPORT_FILE__/$report_file}"
+    validate_prompt "$research_prompt" "research"
 
     # Run Claude interactively
     claude --dangerously-skip-permissions "$research_prompt"
@@ -3795,11 +3827,12 @@ Run the review now."
             echo ""
 
             local team_review_prompt
-            team_review_prompt=$(cat "$CR_DIR/prompts/review-team.txt")
+            team_review_prompt=$(load_prompt "review-team.txt")
             team_review_prompt="${team_review_prompt//__SPEC_NAME__/$spec_name}"
             team_review_prompt="${team_review_prompt//__ABS_SPEC_DIR__/$abs_spec_dir}"
             team_review_prompt="${team_review_prompt//__CODE_TODOS_DIR__/$code_todos_dir}"
             team_review_prompt="${team_review_prompt//__TEAM_MODEL_ARG__/$team_model_arg}"
+            validate_prompt "$team_review_prompt" "review-team"
 
             echo "$team_review_prompt" | claude --dangerously-skip-permissions --print
         else
@@ -4583,12 +4616,13 @@ cmd_compound() {
     echo ""
 
     local compound_prompt
-    compound_prompt=$(cat "$CR_DIR/prompts/compound.txt")
+    compound_prompt=$(load_prompt "compound.txt")
     compound_prompt="${compound_prompt//__FEATURE__/${feature:-recent implementation work}}"
     compound_prompt="${compound_prompt//__SPEC_CONTEXT__/$spec_context}"
     compound_prompt="${compound_prompt//__EXISTING_LEARNINGS__/$existing_learnings}"
     compound_prompt="${compound_prompt//__DATE__/$(date '+%Y-%m-%d')}"
     compound_prompt="${compound_prompt//__FEATURE_SLUG__/${feature:-learnings}}"
+    validate_prompt "$compound_prompt" "compound"
 
     # Run Claude interactively
     claude --dangerously-skip-permissions "$compound_prompt"
