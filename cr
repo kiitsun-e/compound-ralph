@@ -183,6 +183,111 @@ validate_prompt() {
     fi
 }
 
+# Count tasks in a SPEC file, handling sub-tasks.
+# A parent task with sub-tasks is counted by its sub-tasks (not the parent itself).
+# A parent task without sub-tasks counts as 1.
+# Arguments: $1 = spec_file, $2 = "pending"|"completed"|"all"
+# Output: integer count
+count_tasks() {
+    local spec_file="$1"
+    local mode="$2"  # "pending", "completed", or "all"
+    local count=0
+    local in_parent_with_subtasks=false
+    local parent_pending=false
+    local prev_was_parent=false
+
+    while IFS= read -r line; do
+        # Top-level task: starts with "- [ ]" or "- [x]" (no leading whitespace)
+        if [[ "$line" =~ ^-\ \[\ \] ]] || [[ "$line" =~ ^-\ \[x\] ]]; then
+            # If previous parent had no sub-tasks, count it now
+            if [[ "$prev_was_parent" == "true" ]] && [[ "$in_parent_with_subtasks" == "false" ]]; then
+                if [[ "$mode" == "all" ]]; then
+                    count=$((count + 1))
+                elif [[ "$mode" == "pending" ]] && [[ "$parent_pending" == "true" ]]; then
+                    count=$((count + 1))
+                elif [[ "$mode" == "completed" ]] && [[ "$parent_pending" == "false" ]]; then
+                    count=$((count + 1))
+                fi
+            fi
+
+            # Start tracking new parent
+            prev_was_parent=true
+            in_parent_with_subtasks=false
+            if [[ "$line" =~ ^-\ \[\ \] ]]; then
+                parent_pending=true
+            else
+                parent_pending=false
+            fi
+
+        # Sub-task: indented checkbox (2+ spaces before "- [ ]" or "- [x]")
+        elif [[ "$line" =~ ^[[:space:]]+- ]] && { [[ "$line" =~ \[\ \] ]] || [[ "$line" =~ \[x\] ]]; }; then
+            in_parent_with_subtasks=true
+            if [[ "$mode" == "all" ]]; then
+                count=$((count + 1))
+            elif [[ "$mode" == "pending" ]] && [[ "$line" =~ \[\ \] ]]; then
+                count=$((count + 1))
+            elif [[ "$mode" == "completed" ]] && [[ "$line" =~ \[x\] ]]; then
+                count=$((count + 1))
+            fi
+
+        # Non-checkbox line: flush previous parent if it had no sub-tasks
+        else
+            if [[ "$prev_was_parent" == "true" ]] && [[ "$in_parent_with_subtasks" == "false" ]]; then
+                if [[ "$mode" == "all" ]]; then
+                    count=$((count + 1))
+                elif [[ "$mode" == "pending" ]] && [[ "$parent_pending" == "true" ]]; then
+                    count=$((count + 1))
+                elif [[ "$mode" == "completed" ]] && [[ "$parent_pending" == "false" ]]; then
+                    count=$((count + 1))
+                fi
+            fi
+            prev_was_parent=false
+            in_parent_with_subtasks=false
+        fi
+    done < "$spec_file"
+
+    # Flush final parent if it had no sub-tasks
+    if [[ "$prev_was_parent" == "true" ]] && [[ "$in_parent_with_subtasks" == "false" ]]; then
+        if [[ "$mode" == "all" ]]; then
+            count=$((count + 1))
+        elif [[ "$mode" == "pending" ]] && [[ "$parent_pending" == "true" ]]; then
+            count=$((count + 1))
+        elif [[ "$mode" == "completed" ]] && [[ "$parent_pending" == "false" ]]; then
+            count=$((count + 1))
+        fi
+    fi
+
+    echo "$count"
+}
+
+# Check if all tasks (including sub-tasks) are complete in a SPEC file.
+# A parent with sub-tasks is complete only when ALL sub-tasks are checked.
+# Returns 0 (true) if all complete, 1 (false) if any pending.
+all_tasks_complete() {
+    local spec_file="$1"
+    local pending
+    pending=$(count_tasks "$spec_file" "pending")
+    local completed
+    completed=$(count_tasks "$spec_file" "completed")
+
+    if [[ "$pending" -eq 0 ]] && [[ "$completed" -gt 0 ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Extract the CONTINUATION marker from a SPEC file (if any).
+# Format: <!-- CONTINUATION: description of where we left off -->
+# Output: the description text, or empty string if none found.
+get_continuation_marker() {
+    local spec_file="$1"
+    local marker
+    # Extract text between '<!-- CONTINUATION: ' and ' -->' (POSIX-compatible)
+    marker=$(grep '<!-- CONTINUATION:' "$spec_file" 2>/dev/null | tail -1 | sed 's/.*<!-- CONTINUATION: //;s/ -->.*//' || true)
+    # Trim trailing whitespace
+    echo "${marker%"${marker##*[![:space:]]}"}"
+}
+
 # Run Claude with retry logic and timeout
 # Returns 0 on success, 1 on permanent failure
 run_claude_with_retry() {
@@ -3936,11 +4041,11 @@ HELP
         fi
 
         # Check if all tasks are already complete before starting iteration
+        # Uses sub-task-aware counting: parent tasks with sub-tasks are counted
+        # by their sub-tasks, and a parent is only complete when all sub-tasks are.
         local pending_tasks completed_tasks
-        pending_tasks=$(grep -c "^\- \[ \]" "$spec_file" 2>/dev/null || true)
-        completed_tasks=$(grep -c "^\- \[x\]" "$spec_file" 2>/dev/null || true)
-        pending_tasks=${pending_tasks:-0}
-        completed_tasks=${completed_tasks:-0}
+        pending_tasks=$(count_tasks "$spec_file" "pending")
+        completed_tasks=$(count_tasks "$spec_file" "completed")
 
         if [[ $pending_tasks -eq 0 ]] && [[ $completed_tasks -gt 0 ]]; then
             log_info "All tasks complete ($completed_tasks tasks). Running final verification..."
@@ -4033,6 +4138,24 @@ $accumulated_context"
             fi
         fi
 
+        # Check for CONTINUATION marker from previous iteration
+        local continuation_context=""
+        local continuation_marker
+        continuation_marker=$(get_continuation_marker "$spec_file")
+        if [[ -n "$continuation_marker" ]]; then
+            continuation_context="
+CONTINUATION FROM PREVIOUS ITERATION:
+$continuation_marker
+Pick up exactly where the previous iteration left off. The CONTINUATION marker in SPEC.md tells you the state."
+        fi
+
+        # Build sub-task progress summary
+        local subtask_context=""
+        if [[ $pending_tasks -gt 0 ]] || [[ $completed_tasks -gt 0 ]]; then
+            subtask_context="
+TASK PROGRESS: $completed_tasks/$((completed_tasks + pending_tasks)) tasks complete (sub-task aware counting)."
+        fi
+
         # Create the iteration prompt
         local iteration_prompt="You are in iteration $iteration of a Compound Ralph implementation loop.
 $prev_iteration_summary
@@ -4043,7 +4166,9 @@ CRITICAL INSTRUCTIONS:
 4. Complete ONE task, run quality checks, update SPEC.md
 5. If ALL exit criteria are met, output <loop-complete>Feature complete</loop-complete>
 6. Output LEARNING/PATTERN/FIXED markers to help future iterations learn
-$issues_context$learnings_context$accumulated_context
+7. If a task is large, break it into sub-tasks (indented checkboxes under the parent)
+8. Before ending, write a CONTINUATION marker if work is partially done
+$issues_context$learnings_context$accumulated_context$continuation_context$subtask_context
 
 Start by reading both files now."
 
@@ -5575,13 +5700,10 @@ HELP
         status=$(grep "^status:" "$spec_file" | cut -d: -f2 | tr -d ' ' || echo "unknown")
         iteration_count=$(grep "^iteration_count:" "$spec_file" | cut -d: -f2 | tr -d ' ' || echo "0")
 
-        # Count tasks
+        # Count tasks (sub-task aware: parent with sub-tasks counted by sub-tasks)
         local pending completed
-        pending=$(grep -c "^\- \[ \]" "$spec_file" 2>/dev/null || true)
-        completed=$(grep -c "^\- \[x\]" "$spec_file" 2>/dev/null || true)
-        # Default to 0 if empty
-        pending=${pending:-0}
-        completed=${completed:-0}
+        pending=$(count_tasks "$spec_file" "pending")
+        completed=$(count_tasks "$spec_file" "completed")
 
         if [[ "$JSON_OUTPUT" == "true" ]]; then
             json_entries+=("{\"name\":\"$spec_name\",\"status\":\"$status\",\"dir\":\"$spec_dir\",\"pending_tasks\":$pending,\"completed_tasks\":$completed,\"total_iterations\":$iteration_count}")
