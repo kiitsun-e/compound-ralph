@@ -386,9 +386,13 @@ Compound Ralph auto-detects your project type and sets appropriate quality gates
 | `ITERATION_TIMEOUT` | 600 | Max seconds per iteration before timeout |
 | `MAX_CONSECUTIVE_FAILURES` | 3 | Stop after N consecutive failures |
 | `NO_COLOR` | - | Disable colored output ([no-color.org](https://no-color.org/)) |
+| `CR_MODEL` | - | Claude model to use (e.g. `claude-sonnet-4-5-20250929`) |
+| `CR_FALLBACK_MODEL` | - | Fallback model when primary is overloaded |
 
 ```bash
 MAX_ITERATIONS=100 ITERATION_DELAY=5 cr implement
+CR_MODEL=claude-sonnet-4-5-20250929 cr implement    # Use Sonnet for cost savings
+cr implement --model claude-sonnet-4-5-20250929 --fallback-model claude-haiku-4-5-20251001
 ```
 
 ## Self-Healing
