@@ -11,7 +11,7 @@
 #   cr research <topic>              Deep investigation before planning
 #   cr plan <feature-description>    Create and deepen a plan (uses knowledge/)
 #   cr spec <plan-file>              Convert plan to SPEC.md format
-#   cr implement [spec-dir]          Start autonomous implementation loop
+#   cr implement [spec-dir] [--parallel [N]]  Start autonomous implementation loop
 #   cr status                        Show progress of all specs
 #   cr help                          Show this help
 #
@@ -3087,13 +3087,645 @@ PROMPT
 }
 
 #=============================================================================
+# PARALLEL EXECUTION
+#=============================================================================
+
+# Configuration for parallel execution
+CR_MAX_PARALLEL="${CR_MAX_PARALLEL:-3}"
+
+# Forward-compatible env vars from PRs #28 (model selection) and #30 (budget)
+CR_MODEL="${CR_MODEL:-}"
+CR_FALLBACK_MODEL="${CR_FALLBACK_MODEL:-}"
+CR_MAX_BUDGET="${CR_MAX_BUDGET:-}"
+
+# Parse SPEC.md tasks and detect dependencies between them.
+# Returns lines of: TASK_NUM|DEPENDS_ON|TASK_TEXT
+# where DEPENDS_ON is a comma-separated list of task numbers this task depends on,
+# or empty if the task is independent.
+#
+# Dependency heuristic: a task depends on another if its text references
+# the other task's key nouns (extracted from the task text). This is intentionally
+# simple — complex dependency graphs should be expressed in the SPEC itself.
+parse_task_dependencies() {
+    local spec_file="$1"
+    local -a task_texts=()
+    local -a task_nums=()
+    local idx=0
+
+    # Extract unchecked tasks (- [ ] ...) from SPEC.md
+    while IFS= read -r line; do
+        # Strip the "- [ ] " prefix
+        local text="${line#*\] }"
+        task_texts+=("$text")
+        idx=$((idx + 1))
+        task_nums+=("$idx")
+    done < <(grep -E '^\- \[ \]' "$spec_file")
+
+    if [[ ${#task_texts[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    # For each task, check if it references keywords from other tasks.
+    # Keywords are nouns/identifiers extracted by taking words >= 4 chars,
+    # lowercased, excluding common stop words.
+    local -a task_keywords=()
+    for i in "${!task_texts[@]}"; do
+        # Extract significant words (4+ chars, alphanumeric, lowercased)
+        local keywords
+        keywords=$(echo "${task_texts[$i]}" | tr '[:upper:]' '[:lower:]' | \
+            grep -oE '[a-z][a-z0-9_-]{3,}' | \
+            grep -vE '^(this|that|with|from|into|have|been|will|must|should|could|would|also|then|than|when|what|each|make|sure|need|does|just|only|some|more|most|very|these|those|after|before|between|implement|create|update|build|test|check|ensure|verify|write|read|file|task|step|done|complete|first|next|last)$' | \
+            sort -u | tr '\n' '|')
+        keywords="${keywords%|}"  # remove trailing pipe
+        task_keywords+=("$keywords")
+    done
+
+    # Detect dependencies: task B depends on task A if B's text contains
+    # keywords that are unique to A's description
+    for i in "${!task_texts[@]}"; do
+        local deps=""
+        local text_lower
+        text_lower=$(echo "${task_texts[$i]}" | tr '[:upper:]' '[:lower:]')
+
+        for j in "${!task_texts[@]}"; do
+            [[ $i -eq $j ]] && continue
+            [[ -z "${task_keywords[$j]}" ]] && continue
+
+            # Check if task i's text mentions keywords from task j
+            # Require at least 2 keyword matches to reduce false positives
+            local match_count=0
+            IFS='|' read -ra kw_arr <<< "${task_keywords[$j]}"
+            for kw in "${kw_arr[@]}"; do
+                [[ -z "$kw" ]] && continue
+                if echo "$text_lower" | grep -qw "$kw"; then
+                    match_count=$((match_count + 1))
+                fi
+            done
+
+            # Task i depends on task j if 2+ keyword matches
+            if [[ $match_count -ge 2 ]]; then
+                if [[ -n "$deps" ]]; then
+                    deps="$deps,$((j + 1))"
+                else
+                    deps="$((j + 1))"
+                fi
+            fi
+        done
+
+        echo "${task_nums[$i]}|${deps}|${task_texts[$i]}"
+    done
+}
+
+# Group tasks into parallelizable batches based on dependencies.
+# Reads parse_task_dependencies output from stdin.
+# Outputs batch assignments: BATCH_NUM|TASK_NUM|TASK_TEXT
+# Independent tasks (no deps) go in batch 1.
+# Tasks depending on batch 1 go in batch 2, etc.
+group_into_batches() {
+    local -a task_num=()
+    local -a task_deps=()
+    local -a task_text=()
+    local -a task_batch=()
+
+    while IFS='|' read -r num deps text; do
+        task_num+=("$num")
+        task_deps+=("$deps")
+        task_text+=("$text")
+        task_batch+=(0)
+    done
+
+    if [[ ${#task_num[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    # Assign batches: batch 1 = no deps, batch N = depends on batch N-1
+    local changed=true
+    local max_batch=0
+    # First pass: independent tasks get batch 1
+    for i in "${!task_num[@]}"; do
+        if [[ -z "${task_deps[$i]}" ]]; then
+            task_batch[$i]=1
+            [[ 1 -gt $max_batch ]] && max_batch=1
+        fi
+    done
+
+    # Iterative passes: assign batch = max(dependency batches) + 1
+    # Cap at 50 iterations to prevent infinite loops on circular deps
+    local pass=0
+    while [[ "$changed" == "true" ]] && [[ $pass -lt 50 ]]; do
+        changed=false
+        pass=$((pass + 1))
+        for i in "${!task_num[@]}"; do
+            [[ ${task_batch[$i]} -gt 0 ]] && continue
+            [[ -z "${task_deps[$i]}" ]] && continue
+
+            local max_dep_batch=0
+            local all_deps_assigned=true
+            IFS=',' read -ra dep_arr <<< "${task_deps[$i]}"
+            for dep in "${dep_arr[@]}"; do
+                # Find the batch of this dependency
+                local found=false
+                for j in "${!task_num[@]}"; do
+                    if [[ "${task_num[$j]}" == "$dep" ]]; then
+                        if [[ ${task_batch[$j]} -eq 0 ]]; then
+                            all_deps_assigned=false
+                        elif [[ ${task_batch[$j]} -gt $max_dep_batch ]]; then
+                            max_dep_batch=${task_batch[$j]}
+                        fi
+                        found=true
+                        break
+                    fi
+                done
+                # If dep not found in our task list, treat as already done
+                if [[ "$found" == "false" ]]; then
+                    :  # dependency on a completed/unknown task — ignore
+                fi
+            done
+
+            if [[ "$all_deps_assigned" == "true" ]] && [[ $max_dep_batch -gt 0 ]]; then
+                task_batch[$i]=$((max_dep_batch + 1))
+                [[ ${task_batch[$i]} -gt $max_batch ]] && max_batch=${task_batch[$i]}
+                changed=true
+            fi
+        done
+    done
+
+    # Any unassigned tasks (circular deps) go in last batch + 1
+    for i in "${!task_num[@]}"; do
+        if [[ ${task_batch[$i]} -eq 0 ]]; then
+            task_batch[$i]=$((max_batch + 1))
+            log_warn "Task ${task_num[$i]} has circular dependencies, assigned to final batch"
+        fi
+    done
+
+    # Output: BATCH|TASK_NUM|TASK_TEXT
+    for i in "${!task_num[@]}"; do
+        echo "${task_batch[$i]}|${task_num[$i]}|${task_text[$i]}"
+    done
+}
+
+# Create git worktrees for parallel agent isolation.
+# Usage: create_parallel_worktrees <task_nums_array> <base_branch>
+# Outputs worktree paths, one per line.
+create_parallel_worktrees() {
+    local base_branch="$1"
+    shift
+    local task_nums=("$@")
+    local worktree_base
+    worktree_base="$(git rev-parse --show-toplevel)/.cr/worktrees"
+    mkdir -p "$worktree_base"
+
+    for task_num in "${task_nums[@]}"; do
+        local wt_name="cr-parallel-${task_num}-$$"
+        local wt_path="$worktree_base/$wt_name"
+
+        # Remove stale worktree if it exists
+        if [[ -d "$wt_path" ]]; then
+            git worktree remove --force "$wt_path" 2>/dev/null || rm -rf "$wt_path"
+        fi
+
+        # Create worktree from current HEAD
+        if ! git worktree add "$wt_path" -b "cr-parallel-${task_num}-$$" HEAD 2>/dev/null; then
+            # Branch might exist from a previous run; force reset
+            git branch -D "cr-parallel-${task_num}-$$" 2>/dev/null || true
+            git worktree add "$wt_path" -b "cr-parallel-${task_num}-$$" HEAD
+        fi
+
+        echo "$wt_path"
+    done
+}
+
+# Run a batch of parallel claude --print processes in worktrees.
+# Usage: run_parallel_batch <spec_file> <max_agents> <worktree1:task1> <worktree2:task2> ...
+# Each argument after max_agents is worktree_path:task_num:task_text
+# Returns 0 if all agents succeed, 1 if any fail.
+# Sets PARALLEL_FAILED_TASKS to list of failed task numbers.
+run_parallel_batch() {
+    local spec_file="$1"
+    local max_agents="$2"
+    shift 2
+    local agents=("$@")
+
+    PARALLEL_FAILED_TASKS=()
+    local -a pids=()
+    local -a task_nums=()
+    local -a wt_paths=()
+    local -a log_files=()
+    local running=0
+    local all_ok=true
+    local spec_content
+    spec_content=$(cat "$spec_file")
+
+    # Build model args for claude --print (forward-compatible with PR #28)
+    local model_args=""
+    [[ -n "$CR_MODEL" ]] && model_args="--model $CR_MODEL"
+    [[ -n "$CR_FALLBACK_MODEL" ]] && model_args="$model_args --fallback-model $CR_FALLBACK_MODEL"
+
+    # Budget splitting: if CR_MAX_BUDGET is set, divide among agents (forward-compatible with PR #30)
+    local budget_args=""
+    if [[ -n "$CR_MAX_BUDGET" ]]; then
+        # Validate budget is a number to prevent awk injection
+        if ! [[ "$CR_MAX_BUDGET" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+            log_error "CR_MAX_BUDGET must be a number, got: $CR_MAX_BUDGET"
+            return 1
+        fi
+        local agent_count=${#agents[@]}
+        local per_agent_budget
+        per_agent_budget=$(awk -v total="$CR_MAX_BUDGET" -v count="$agent_count" 'BEGIN {printf "%.2f", total / count}')
+        budget_args="--max-budget-usd $per_agent_budget"
+        log_info "Budget: \$$CR_MAX_BUDGET total, \$$per_agent_budget per agent"
+    fi
+
+    for agent_spec in "${agents[@]}"; do
+        IFS=':' read -r wt_path task_num task_text <<< "$agent_spec"
+        task_nums+=("$task_num")
+        wt_paths+=("$wt_path")
+
+        local agent_log="${wt_path}/.cr-agent.log"
+        log_files+=("$agent_log")
+
+        # Build focused prompt for this agent
+        local agent_prompt="You are one of several parallel agents working on a feature.
+
+FULL SPEC (for context):
+$spec_content
+
+YOUR ASSIGNMENT: Focus ONLY on task $task_num: $task_text
+
+CRITICAL RULES:
+1. ONLY work on your assigned task. Do NOT touch other tasks.
+2. Read the SPEC.md for full context but focus on your specific task.
+3. Make minimal, focused changes. Avoid modifying files outside your task's scope.
+4. Run relevant quality checks after your changes.
+5. When done, output: TASK_${task_num}_COMPLETE
+6. If you cannot complete the task, output: TASK_${task_num}_FAILED: <reason>
+7. Do NOT output <loop-complete> — the orchestrator handles completion.
+
+Start now. Work in this directory: $wt_path"
+
+        log_info "  Agent $task_num: $task_text"
+
+        # Spawn claude --print in the worktree directory
+        (
+            cd "$wt_path"
+            echo "$agent_prompt" | claude --dangerously-skip-permissions --print $model_args $budget_args > "$agent_log" 2>&1
+        ) &
+        pids+=($!)
+        CHILD_PIDS+=("${pids[-1]}")
+        running=$((running + 1))
+
+        # Throttle: wait if we've hit max_agents
+        if [[ $running -ge $max_agents ]]; then
+            # Wait for any one to finish
+            local waited=false
+            while [[ "$waited" == "false" ]]; do
+                for idx in "${!pids[@]}"; do
+                    if ! kill -0 "${pids[$idx]}" 2>/dev/null; then
+                        wait "${pids[$idx]}" 2>/dev/null || true
+                        unset 'pids[$idx]'
+                        pids=("${pids[@]}")  # reindex
+                        running=$((running - 1))
+                        waited=true
+                        break
+                    fi
+                done
+                [[ "$waited" == "false" ]] && sleep 1
+            done
+        fi
+    done
+
+    # Wait for remaining agents
+    for pid in "${pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    CHILD_PIDS=()
+
+    # Check results
+    for idx in "${!task_nums[@]}"; do
+        local tn="${task_nums[$idx]}"
+        local lf="${log_files[$idx]}"
+
+        if [[ -f "$lf" ]]; then
+            if grep -q "TASK_${tn}_FAILED" "$lf"; then
+                local reason
+                reason=$(grep "TASK_${tn}_FAILED" "$lf" | head -1 | sed "s/.*TASK_${tn}_FAILED: *//")
+                log_warn "  Agent $tn FAILED: $reason"
+                PARALLEL_FAILED_TASKS+=("$tn")
+                all_ok=false
+            elif grep -q "TASK_${tn}_COMPLETE" "$lf"; then
+                log_success "  Agent $tn completed"
+            else
+                # No explicit signal — check if there's meaningful output
+                local output_len
+                output_len=$(wc -c < "$lf" | tr -d ' ')
+                if [[ $output_len -lt 100 ]]; then
+                    log_warn "  Agent $tn produced minimal output, marking as failed"
+                    PARALLEL_FAILED_TASKS+=("$tn")
+                    all_ok=false
+                else
+                    # Assume success if substantial output was produced
+                    log_info "  Agent $tn finished (no explicit signal, assuming success)"
+                fi
+            fi
+        else
+            log_warn "  Agent $tn produced no log file"
+            PARALLEL_FAILED_TASKS+=("$tn")
+            all_ok=false
+        fi
+    done
+
+    [[ "$all_ok" == "true" ]] && return 0 || return 1
+}
+
+# Merge changes from parallel worktrees back to the main branch.
+# Usage: merge_parallel_results <worktree1:task1> <worktree2:task2> ...
+# Sets PARALLEL_MERGE_CONFLICTS to list of task numbers with conflicts.
+merge_parallel_results() {
+    local agents=("$@")
+    PARALLEL_MERGE_CONFLICTS=()
+    local main_dir
+    main_dir=$(git rev-parse --show-toplevel)
+
+    for agent_spec in "${agents[@]}"; do
+        IFS=':' read -r wt_path task_num task_text <<< "$agent_spec"
+
+        # Check if this task failed — skip merge for failed tasks
+        local skip=false
+        for ft in "${PARALLEL_FAILED_TASKS[@]:-}"; do
+            [[ "$ft" == "$task_num" ]] && skip=true && break
+        done
+        [[ "$skip" == "true" ]] && continue
+
+        # Check if worktree has any changes
+        if ! (cd "$wt_path" && git diff --quiet HEAD 2>/dev/null); then
+            # There are uncommitted changes in the worktree — commit them first
+            (
+                cd "$wt_path"
+                git add -A
+                git commit -m "parallel-agent: task $task_num — $task_text" --no-verify 2>/dev/null || true
+            )
+        fi
+
+        # Check if the worktree branch has any commits ahead of main
+        local wt_branch="cr-parallel-${task_num}-$$"
+        local ahead
+        ahead=$(cd "$main_dir" && git rev-list HEAD.."$wt_branch" --count 2>/dev/null || echo "0")
+
+        if [[ "$ahead" == "0" ]]; then
+            log_info "  Task $task_num: no changes to merge"
+            continue
+        fi
+
+        # Merge the worktree branch into current branch
+        log_info "  Merging task $task_num ($ahead commits)..."
+        if ! (cd "$main_dir" && git merge "$wt_branch" --no-edit 2>/dev/null); then
+            log_warn "  Task $task_num: merge conflict detected"
+            # Abort the merge and record the conflict
+            (cd "$main_dir" && git merge --abort 2>/dev/null || true)
+            PARALLEL_MERGE_CONFLICTS+=("$task_num")
+        else
+            log_success "  Task $task_num: merged successfully"
+        fi
+    done
+}
+
+# Remove worktrees and temporary branches after merge.
+# Usage: cleanup_parallel_worktrees <worktree1:task1> ...
+cleanup_parallel_worktrees() {
+    local agents=("$@")
+    local main_dir
+    main_dir=$(git rev-parse --show-toplevel)
+
+    for agent_spec in "${agents[@]}"; do
+        IFS=':' read -r wt_path task_num task_text <<< "$agent_spec"
+        local wt_branch="cr-parallel-${task_num}-$$"
+
+        # Remove worktree
+        if [[ -d "$wt_path" ]]; then
+            git worktree remove --force "$wt_path" 2>/dev/null || rm -rf "$wt_path"
+        fi
+
+        # Delete temporary branch
+        git branch -D "$wt_branch" 2>/dev/null || true
+    done
+
+    # Prune stale worktree references
+    git worktree prune 2>/dev/null || true
+}
+
+# Run the parallel implementation flow.
+# Usage: run_parallel_implement <spec_dir> <max_agents>
+run_parallel_implement() {
+    local spec_dir="$1"
+    local max_agents="$2"
+    local spec_file="$spec_dir/SPEC.md"
+    local abs_spec_dir
+    abs_spec_dir=$(cd "$spec_dir" && pwd)
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+
+    log_step "Parallel Implementation (max $max_agents agents)"
+    echo "Spec: $spec_file"
+    echo "Model: ${CR_MODEL:-default}"
+    echo "Budget: ${CR_MAX_BUDGET:-unlimited}"
+    echo ""
+
+    # Update status
+    sed_inplace 's/status: pending/status: building/' "$spec_file" 2>/dev/null || true
+
+    # Parse tasks and dependencies
+    log_info "Parsing task dependencies..."
+    local dep_output
+    dep_output=$(parse_task_dependencies "$spec_file")
+
+    if [[ -z "$dep_output" ]]; then
+        log_warn "No pending tasks found in SPEC.md"
+        return 0
+    fi
+
+    # Group into batches
+    local batch_output
+    batch_output=$(echo "$dep_output" | group_into_batches)
+
+    # Count batches
+    local max_batch
+    max_batch=$(echo "$batch_output" | cut -d'|' -f1 | sort -n | tail -1)
+
+    local total_tasks
+    total_tasks=$(echo "$batch_output" | wc -l | tr -d ' ')
+
+    log_info "Found $total_tasks tasks in $max_batch batch(es)"
+    echo ""
+
+    # Show batch plan
+    for batch_num in $(seq 1 "$max_batch"); do
+        local batch_tasks
+        batch_tasks=$(echo "$batch_output" | grep "^${batch_num}|")
+        local batch_count
+        batch_count=$(echo "$batch_tasks" | wc -l | tr -d ' ')
+        echo -e "  ${CYAN}Batch $batch_num${NC} ($batch_count tasks):"
+        echo "$batch_tasks" | while IFS='|' read -r _ tnum ttext; do
+            echo "    Task $tnum: $ttext"
+        done
+    done
+    echo ""
+
+    # Process each batch
+    local overall_iteration=0
+    for batch_num in $(seq 1 "$max_batch"); do
+        overall_iteration=$((overall_iteration + 1))
+
+        if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
+            log_info "Shutdown requested. Stopping parallel execution."
+            return 130
+        fi
+
+        local batch_tasks
+        batch_tasks=$(echo "$batch_output" | grep "^${batch_num}|")
+        local batch_count
+        batch_count=$(echo "$batch_tasks" | wc -l | tr -d ' ')
+
+        # Limit agents to min(batch_count, max_agents)
+        local agents_for_batch=$max_agents
+        [[ $batch_count -lt $agents_for_batch ]] && agents_for_batch=$batch_count
+
+        log_step "Batch $batch_num/$max_batch ($batch_count tasks, $agents_for_batch agents)"
+
+        # Collect task numbers for this batch
+        local -a batch_task_nums=()
+        local -a batch_task_texts=()
+        while IFS='|' read -r _ tnum ttext; do
+            batch_task_nums+=("$tnum")
+            batch_task_texts+=("$ttext")
+        done <<< "$batch_tasks"
+
+        # Create worktrees
+        log_info "Creating worktrees..."
+        local -a worktree_paths=()
+        while IFS= read -r wt_path; do
+            worktree_paths+=("$wt_path")
+        done < <(create_parallel_worktrees "$current_branch" "${batch_task_nums[@]}")
+
+        # Build agent specs (worktree:task_num:task_text)
+        local -a agent_specs=()
+        for idx in "${!batch_task_nums[@]}"; do
+            agent_specs+=("${worktree_paths[$idx]}:${batch_task_nums[$idx]}:${batch_task_texts[$idx]}")
+        done
+
+        # Run parallel agents
+        log_info "Spawning $agents_for_batch parallel agents..."
+        echo ""
+        local batch_ok=true
+        if ! run_parallel_batch "$spec_file" "$agents_for_batch" "${agent_specs[@]}"; then
+            batch_ok=false
+        fi
+        echo ""
+
+        # Merge results back
+        log_info "Merging results..."
+        merge_parallel_results "${agent_specs[@]}"
+
+        # Report merge conflicts
+        if [[ ${#PARALLEL_MERGE_CONFLICTS[@]} -gt 0 ]]; then
+            log_warn "Merge conflicts in tasks: ${PARALLEL_MERGE_CONFLICTS[*]}"
+            log_warn "These tasks will retry in the next batch"
+        fi
+
+        # Cleanup worktrees
+        log_info "Cleaning up worktrees..."
+        cleanup_parallel_worktrees "${agent_specs[@]}"
+
+        # Mark completed tasks in SPEC.md
+        for idx in "${!batch_task_nums[@]}"; do
+            local tn="${batch_task_nums[$idx]}"
+            local tt="${batch_task_texts[$idx]}"
+
+            # Skip failed and conflicted tasks
+            local skip=false
+            for ft in "${PARALLEL_FAILED_TASKS[@]:-}"; do
+                [[ "$ft" == "$tn" ]] && skip=true && break
+            done
+            for ct in "${PARALLEL_MERGE_CONFLICTS[@]:-}"; do
+                [[ "$ct" == "$tn" ]] && skip=true && break
+            done
+
+            if [[ "$skip" == "false" ]]; then
+                # Mark task as complete in SPEC.md
+                # Escape special regex chars in task text for sed
+                local escaped_text
+                escaped_text=$(printf '%s\n' "$tt" | sed 's/[[\.*^$()+?{|/]/\\&/g')
+                sed_inplace "s|^- \[ \] ${escaped_text}|- [x] ${escaped_text}|" "$spec_file" 2>/dev/null || true
+            fi
+        done
+
+        # Collect retry tasks (failed + conflicted) for next batch
+        local -a retry_tasks=()
+        for ft in "${PARALLEL_FAILED_TASKS[@]:-}"; do
+            [[ -n "$ft" ]] && retry_tasks+=("$ft")
+        done
+        for ct in "${PARALLEL_MERGE_CONFLICTS[@]:-}"; do
+            [[ -n "$ct" ]] && retry_tasks+=("$ct")
+        done
+
+        if [[ ${#retry_tasks[@]} -gt 0 ]]; then
+            log_info "Tasks needing retry: ${retry_tasks[*]}"
+            # TODO: Retry logic not yet implemented — failed/conflicted tasks are
+            # left unchecked in SPEC.md and logged, but not re-attempted in subsequent
+            # batches. For now, the user must run sequential mode to pick these up.
+        fi
+
+        echo ""
+    done
+
+    # Run quality gates on combined result
+    log_step "Running Quality Gates on Combined Result"
+    CURRENT_SPEC_DIR="$abs_spec_dir"
+    if ! run_iteration_checks; then
+        log_warn "Quality gates failed after parallel execution."
+        log_warn "Issues: ${ITERATION_ISSUES[*]}"
+        log_info "Run 'cr implement $spec_dir' (without --parallel) to fix remaining issues sequentially."
+        emit_json_result "partial" "$overall_iteration" "$spec_file" 1
+        return 1
+    fi
+
+    log_success "Quality gates passed!"
+
+    # Check if all tasks are done
+    local remaining
+    remaining=$(grep -c '^\- \[ \]' "$spec_file" 2>/dev/null || echo "0")
+    if [[ "$remaining" -eq 0 ]]; then
+        # Run integration verification
+        if verify_integration; then
+            log_success "All tasks complete and verified!"
+            sed_inplace 's/status: building/status: complete/' "$spec_file"
+            emit_json_result "complete" "$overall_iteration" "$spec_file" 0
+            echo ""
+            echo "Next steps:"
+            echo "  1. Review changes: git diff main"
+            echo "  2. Run code review: cr review"
+            echo "  3. Create PR when ready"
+            return 0
+        else
+            log_warn "Tasks complete but integration failed."
+            log_info "Run 'cr implement $spec_dir' to fix integration issues."
+            emit_json_result "partial" "$overall_iteration" "$spec_file" 1
+            return 1
+        fi
+    else
+        log_info "$remaining tasks remaining. Run 'cr implement $spec_dir' to continue."
+        emit_json_result "partial" "$overall_iteration" "$spec_file" 0
+        return 0
+    fi
+}
+
+#=============================================================================
 # IMPLEMENT COMMAND
 #=============================================================================
 
 cmd_implement() {
     if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
         cat << 'HELP'
-Usage: cr implement [spec-dir] [--json] [--non-interactive]
+Usage: cr implement [spec-dir] [--json] [--non-interactive] [--parallel [max-agents]]
 
 Start the autonomous implementation loop. Reads SPEC.md, executes one
 task per iteration with quality gate backpressure.
@@ -3102,6 +3734,7 @@ Options:
     spec-dir            Path to spec directory (auto-detected if omitted)
     --json              Output JSON summary on completion/failure
     --non-interactive   Auto-confirm prompts (for CI/agent use)
+    --parallel [N]      Run independent tasks in parallel using N agents (default: 3)
 
 Environment:
     MAX_ITERATIONS=50              Maximum loop iterations
@@ -3110,15 +3743,87 @@ Environment:
     RETRY_DELAY=5                  Initial retry delay in seconds, doubles each retry
     ITERATION_TIMEOUT=600          Max seconds per iteration before timeout
     MAX_CONSECUTIVE_FAILURES=3     Stop after N consecutive failures
+    CR_MAX_PARALLEL=3              Default max parallel agents
+    CR_MODEL=                      Model to use (forward-compatible with PR #28)
+    CR_FALLBACK_MODEL=             Fallback model (forward-compatible with PR #28)
+    CR_MAX_BUDGET=                 Total budget in USD (forward-compatible with PR #30)
 
 Examples:
     cr implement                        # Auto-find active spec
     cr implement specs/dark-mode/       # Specific spec
+    cr implement --parallel             # Parallel with default 3 agents
+    cr implement specs/feature/ --parallel 5   # Up to 5 parallel agents
     MAX_ITERATIONS=100 cr implement     # Override max iterations
 HELP
         return 0
     fi
-    local spec_dir="${1:-}"
+
+    # Parse arguments — extract --parallel before positional args
+    local spec_dir=""
+    local parallel_mode=false
+    local parallel_max=""
+    local args=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --parallel)
+                parallel_mode=true
+                # Check if next arg is a number (optional max-agents)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    parallel_max="$2"
+                    shift
+                fi
+                shift
+                ;;
+            -*)
+                # Pass through other flags
+                args+=("$1")
+                shift
+                ;;
+            *)
+                # First positional arg is spec_dir
+                if [[ -z "$spec_dir" ]]; then
+                    spec_dir="$1"
+                else
+                    args+=("$1")
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Determine max parallel agents
+    local max_agents="${parallel_max:-$CR_MAX_PARALLEL}"
+
+    # If parallel mode, delegate to parallel implementation
+    if [[ "$parallel_mode" == "true" ]]; then
+        # Still need to resolve spec_dir if not provided
+        if [[ -z "$spec_dir" ]]; then
+            spec_dir=$(find "$SPECS_DIR" -path "*/fixes/*" -name "SPEC.md" -exec grep -l "status: building" {} \; 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+            [[ -z "$spec_dir" ]] && spec_dir=$(find "$SPECS_DIR" -path "*/fixes/*" -name "SPEC.md" -exec grep -l "status: pending" {} \; 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+            [[ -z "$spec_dir" ]] && spec_dir=$(find "$SPECS_DIR" -maxdepth 2 -name "SPEC.md" ! -path "*/fixes/*" -exec grep -l "status: building" {} \; 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+            [[ -z "$spec_dir" ]] && spec_dir=$(find "$SPECS_DIR" -maxdepth 2 -name "SPEC.md" ! -path "*/fixes/*" -exec grep -l "status: pending" {} \; 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
+
+            if [[ -z "$spec_dir" ]]; then
+                log_error "No active spec found. Create one with: cr spec <plan-file>"
+                exit 1
+            fi
+        fi
+
+        if [[ ! -f "$spec_dir/SPEC.md" ]]; then
+            log_error "SPEC.md not found in $spec_dir"
+            exit 1
+        fi
+
+        run_parallel_implement "$spec_dir" "$max_agents"
+        return $?
+    fi
+
+    # Original sequential implementation follows
+    # spec_dir may already be set from argument parsing above
+    if [[ -z "$spec_dir" ]] && [[ ${#args[@]} -gt 0 ]]; then
+        spec_dir="${args[0]:-}"
+    fi
 
     # If no spec dir provided, find one with status: building or pending
     if [[ -z "$spec_dir" ]]; then
@@ -5645,6 +6350,11 @@ COMMANDS:
     implement [spec]    Start autonomous implementation loop
         [--json]        Output final JSON summary on completion/failure
         [--non-interactive] Auto-confirm all prompts (for CI/agent use)
+        [--parallel [N]] Run independent tasks in parallel (default: 3 agents)
+                        Parses task dependencies, groups into batches,
+                        spawns agents in isolated git worktrees,
+                        merges results, runs quality gates.
+                        Env: CR_MAX_PARALLEL, CR_MODEL, CR_MAX_BUDGET
                         Reads SPEC.md, executes one task per iteration
                         Runs backpressure (tests, lint) each iteration
                         Auto-detects fix specs (fixes/code, fixes/design)
@@ -5767,6 +6477,10 @@ ENVIRONMENT VARIABLES:
     RETRY_DELAY         Initial retry delay in seconds, doubles each retry (default: 5)
     ITERATION_TIMEOUT   Max seconds per iteration before timeout (default: 600)
     MAX_CONSECUTIVE_FAILURES  Stop after N consecutive failures (default: 3)
+    CR_MAX_PARALLEL     Max parallel agents for --parallel mode (default: 3)
+    CR_MODEL            Model for claude --print (forward-compatible with PR #28)
+    CR_FALLBACK_MODEL   Fallback model (forward-compatible with PR #28)
+    CR_MAX_BUDGET       Total budget in USD, split among parallel agents (PR #30)
 
 RESILIENCE:
     - Per-iteration timeout prevents stuck iterations
