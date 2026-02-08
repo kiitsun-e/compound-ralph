@@ -1295,9 +1295,10 @@ EOF
     discovery_entries=$(jq -r '.learnings // [] | map(select(.category == "discovery" or .category == "success")) | .[-10:] | .[] | "- " + .learning' "$learnings_file" 2>/dev/null || echo "")
     pattern_entries=$(jq -r '.learnings // [] | map(select(.category == "pattern")) | .[-10:] | .[] | "- " + .learning' "$learnings_file" 2>/dev/null || echo "")
 
-    # Build the full output first
-    local output
-    output="## Accumulated Context (from previous iterations)
+    # Helper: assemble output from current entry vars. Uses a truncation header when trimming occurred.
+    _build_context_output() {
+        local header="${1:-}"
+        printf '%s' "${header}## Accumulated Context (from previous iterations)
 
 ### Learnings
 ${discovery_entries:-None yet}
@@ -1307,6 +1308,10 @@ ${fix_entries:-None yet}
 
 ### Patterns Discovered in This Codebase
 ${pattern_entries:-None yet}"
+    }
+
+    local output
+    output=$(_build_context_output)
 
     # If within cap, return as-is
     if [[ ${#output} -le $max_chars ]]; then
@@ -1314,60 +1319,29 @@ ${pattern_entries:-None yet}"
         return
     fi
 
-    # Truncation needed. Rebuild with fewer entries, keeping fix entries (prevent regression)
-    # and most recent entries from other categories.
-    # Strategy: reduce discovery/pattern entries from the oldest (top) until we fit.
+    # Truncation needed. Keep fix entries (prevent regression), trim discovery then pattern
+    # from the oldest (top) until we fit. Always truncates at entry boundaries.
+    local truncation_header
+    truncation_header="(Showing most recent learnings — older entries truncated to stay within context budget)
+
+"
 
     # Trim discovery entries from oldest first
     while [[ ${#output} -gt $max_chars ]] && [[ -n "$discovery_entries" ]]; do
-        # Remove the first line (oldest entry)
         discovery_entries=$(printf '%s' "$discovery_entries" | tail -n +2)
-        output="(Showing most recent learnings — older entries truncated to stay within context budget)
-
-## Accumulated Context (from previous iterations)
-
-### Learnings
-${discovery_entries:-None yet}
-
-### Errors You've Fixed Before (Don't Repeat)
-${fix_entries:-None yet}
-
-### Patterns Discovered in This Codebase
-${pattern_entries:-None yet}"
+        output=$(_build_context_output "$truncation_header")
     done
 
     # If still over, trim pattern entries from oldest first
     while [[ ${#output} -gt $max_chars ]] && [[ -n "$pattern_entries" ]]; do
         pattern_entries=$(printf '%s' "$pattern_entries" | tail -n +2)
-        output="(Showing most recent learnings — older entries truncated to stay within context budget)
-
-## Accumulated Context (from previous iterations)
-
-### Learnings
-${discovery_entries:-None yet}
-
-### Errors You've Fixed Before (Don't Repeat)
-${fix_entries:-None yet}
-
-### Patterns Discovered in This Codebase
-${pattern_entries:-None yet}"
+        output=$(_build_context_output "$truncation_header")
     done
 
     # Last resort: trim fix entries from oldest (should be rare)
     while [[ ${#output} -gt $max_chars ]] && [[ -n "$fix_entries" ]]; do
         fix_entries=$(printf '%s' "$fix_entries" | tail -n +2)
-        output="(Showing most recent learnings — older entries truncated to stay within context budget)
-
-## Accumulated Context (from previous iterations)
-
-### Learnings
-${discovery_entries:-None yet}
-
-### Errors You've Fixed Before (Don't Repeat)
-${fix_entries:-None yet}
-
-### Patterns Discovered in This Codebase
-${pattern_entries:-None yet}"
+        output=$(_build_context_output "$truncation_header")
     done
 
     printf '%s\n' "$output"
