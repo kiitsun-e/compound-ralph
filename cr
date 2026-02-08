@@ -61,6 +61,13 @@ RETRY_DELAY="${RETRY_DELAY:-5}"
 ITERATION_TIMEOUT="${ITERATION_TIMEOUT:-600}"  # 10 minutes per iteration
 MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-3}"
 
+# Budget controls (Issue 4 from REVIEW.md)
+# Per-iteration budget passed to claude --max-budget-usd
+CR_MAX_ITER_BUDGET="${CR_MAX_ITER_BUDGET:-}"
+# Total budget for the entire run — stops the loop if exceeded
+# Tracked via .cr/budget_spent.txt across iterations
+CR_MAX_BUDGET="${CR_MAX_BUDGET:-}"
+
 # Agent/machine invocation flags
 NON_INTERACTIVE=false
 JSON_OUTPUT=false
@@ -183,6 +190,14 @@ validate_prompt() {
     fi
 }
 
+# Build --max-budget-usd arg string from CR_MAX_ITER_BUDGET.
+# Used by all claude --print invocations to enforce per-call budget.
+get_budget_args() {
+    if [[ -n "$CR_MAX_ITER_BUDGET" ]]; then
+        echo "--max-budget-usd $CR_MAX_ITER_BUDGET"
+    fi
+}
+
 # Run Claude with retry logic and timeout
 # Returns 0 on success, 1 on permanent failure
 run_claude_with_retry() {
@@ -213,8 +228,13 @@ run_claude_with_retry() {
         # Disable set -e temporarily to capture exit code
         set +e
 
+        # Build budget args for per-iteration budget control
+        local budget_args
+        budget_args=$(get_budget_args)
+
         # Start Claude in background
-        echo "$prompt" | claude --dangerously-skip-permissions --print > "$temp_output" 2>&1 &
+        # shellcheck disable=SC2086
+        echo "$prompt" | claude --dangerously-skip-permissions --print $budget_args > "$temp_output" 2>&1 &
         local claude_pid=$!
         CHILD_PIDS+=("$claude_pid")
 
@@ -2825,7 +2845,8 @@ HELP
     validate_prompt "$conversion_prompt" "spec-conversion"
 
     # Run Claude to do the conversion
-    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print
+    # shellcheck disable=SC2086
+    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print $(get_budget_args)
 
     # Verify SPEC.md was created
     if [[ ! -f "$spec_dir/SPEC.md" ]]; then
@@ -3093,15 +3114,17 @@ PROMPT
 cmd_implement() {
     if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
         cat << 'HELP'
-Usage: cr implement [spec-dir] [--json] [--non-interactive]
+Usage: cr implement [spec-dir] [options]
 
 Start the autonomous implementation loop. Reads SPEC.md, executes one
 task per iteration with quality gate backpressure.
 
 Options:
-    spec-dir            Path to spec directory (auto-detected if omitted)
-    --json              Output JSON summary on completion/failure
-    --non-interactive   Auto-confirm prompts (for CI/agent use)
+    spec-dir                Path to spec directory (auto-detected if omitted)
+    --json                  Output JSON summary on completion/failure
+    --non-interactive       Auto-confirm prompts (for CI/agent use)
+    --max-budget <USD>      Total budget cap for the entire run (overrides CR_MAX_BUDGET)
+    --max-iter-budget <USD> Per-iteration budget cap (overrides CR_MAX_ITER_BUDGET)
 
 Environment:
     MAX_ITERATIONS=50              Maximum loop iterations
@@ -3110,15 +3133,42 @@ Environment:
     RETRY_DELAY=5                  Initial retry delay in seconds, doubles each retry
     ITERATION_TIMEOUT=600          Max seconds per iteration before timeout
     MAX_CONSECUTIVE_FAILURES=3     Stop after N consecutive failures
+    CR_MAX_BUDGET                  Total budget for the run in USD
+    CR_MAX_ITER_BUDGET             Per-iteration budget in USD (passed to --max-budget-usd)
 
 Examples:
     cr implement                        # Auto-find active spec
     cr implement specs/dark-mode/       # Specific spec
     MAX_ITERATIONS=100 cr implement     # Override max iterations
+    cr implement --max-budget 10 --max-iter-budget 2  # Budget limits
 HELP
         return 0
     fi
-    local spec_dir="${1:-}"
+
+    # Parse implement-specific flags
+    local spec_dir=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --max-budget)
+                CR_MAX_BUDGET="${2:-}"
+                [[ -z "$CR_MAX_BUDGET" ]] && { log_error "--max-budget requires a USD value"; exit 1; }
+                shift 2
+                ;;
+            --max-iter-budget)
+                CR_MAX_ITER_BUDGET="${2:-}"
+                [[ -z "$CR_MAX_ITER_BUDGET" ]] && { log_error "--max-iter-budget requires a USD value"; exit 1; }
+                shift 2
+                ;;
+            -*)
+                # Skip flags already handled globally (--json, --non-interactive)
+                shift
+                ;;
+            *)
+                spec_dir="$1"
+                shift
+                ;;
+        esac
+    done
 
     # If no spec dir provided, find one with status: building or pending
     if [[ -z "$spec_dir" ]]; then
@@ -3204,9 +3254,27 @@ HELP
     echo "Max iterations: $MAX_ITERATIONS"
     echo "Delay:          ${ITERATION_DELAY}s between iterations"
     echo "Learnings:      .cr/learnings.json"
+    [[ -n "$CR_MAX_ITER_BUDGET" ]] && echo "Per-iter budget: \$${CR_MAX_ITER_BUDGET}"
+    [[ -n "$CR_MAX_BUDGET" ]] && echo "Total budget:    \$${CR_MAX_BUDGET}"
     echo ""
     echo "Press Ctrl+C to stop at any time."
     echo ""
+
+    # Initialize budget tracking file
+    # Assumption: we estimate cost as iteration_count * CR_MAX_ITER_BUDGET
+    # since exact per-iteration cost isn't available without --output-format json.
+    # TODO: Could use --output-format json to get exact usage, but that changes
+    # output parsing significantly. Simple estimation is good enough for a guard rail.
+    if [[ -n "$CR_MAX_BUDGET" ]]; then
+        if [[ -z "$CR_MAX_ITER_BUDGET" ]]; then
+            log_warn "CR_MAX_BUDGET is set but CR_MAX_ITER_BUDGET is not. Budget tracking requires both."
+            log_warn "Set CR_MAX_ITER_BUDGET to enable the total budget guard rail."
+        fi
+        mkdir -p .cr
+        if [[ ! -f .cr/budget_spent.txt ]]; then
+            echo "0" > .cr/budget_spent.txt
+        fi
+    fi
 
     local iteration=0
     local history_dir="$spec_dir/.history"
@@ -3228,6 +3296,24 @@ HELP
         if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
             log_info "Shutdown requested. Stopping loop."
             exit 130
+        fi
+
+        # Check total budget before starting iteration
+        if [[ -n "$CR_MAX_BUDGET" ]]; then
+            local spent
+            spent=$(cat .cr/budget_spent.txt 2>/dev/null || echo 0)
+            # Sanitize: default to 0 if file was empty or corrupted
+            spent="${spent// /}"
+            [[ "$spent" =~ ^[0-9]*\.?[0-9]+$ ]] || spent=0
+            # Use awk for float comparison (bash doesn't support float arithmetic)
+            if awk "BEGIN {exit !($spent >= $CR_MAX_BUDGET)}"; then
+                echo ""
+                log_error "Total budget exhausted: \$${spent} spent >= \$${CR_MAX_BUDGET} limit"
+                log_info "Completed $((iteration - 1)) iterations before hitting budget."
+                log_info "To continue: increase CR_MAX_BUDGET or reset .cr/budget_spent.txt"
+                emit_json_result "budget_exceeded" "$((iteration - 1))" "$spec_file" 1
+                exit 1
+            fi
         fi
 
         # Check if all tasks are already complete before starting iteration
@@ -3392,6 +3478,15 @@ Start by reading both files now."
 
         # Success - reset consecutive failures
         CONSECUTIVE_FAILURES=0
+
+        # Track budget spent (estimate: iteration_budget per successful iteration)
+        if [[ -n "$CR_MAX_BUDGET" ]] && [[ -n "$CR_MAX_ITER_BUDGET" ]]; then
+            local prev_spent
+            prev_spent=$(cat .cr/budget_spent.txt 2>/dev/null || echo 0)
+            prev_spent="${prev_spent// /}"
+            [[ "$prev_spent" =~ ^[0-9]*\.?[0-9]+$ ]] || prev_spent=0
+            awk "BEGIN {printf \"%.2f\", $prev_spent + $CR_MAX_ITER_BUDGET}" > .cr/budget_spent.txt
+        fi
 
         # Run per-iteration checks (tests, lint, typecheck)
         log_info "Running per-iteration checks..."
@@ -3867,9 +3962,11 @@ Run the review now."
             team_review_prompt="${team_review_prompt//__TEAM_MODEL_ARG__/$team_model_arg}"
             validate_prompt "$team_review_prompt" "review-team"
 
-            echo "$team_review_prompt" | claude --dangerously-skip-permissions --print
+            # shellcheck disable=SC2086
+            echo "$team_review_prompt" | claude --dangerously-skip-permissions --print $(get_budget_args)
         else
-            echo "$code_review_prompt" | claude --dangerously-skip-permissions --print
+            # shellcheck disable=SC2086
+            echo "$code_review_prompt" | claude --dangerously-skip-permissions --print $(get_budget_args)
         fi
         echo ""
     fi
@@ -3927,7 +4024,8 @@ SPEC FILE: $abs_spec_dir/SPEC.md"
             design_review_prompt="${design_review_prompt//__DESIGN_SPEC_TAG__/$design_spec_tag}"
             validate_prompt "$design_review_prompt" "review-design"
 
-            echo "$design_review_prompt" | claude --dangerously-skip-permissions --print
+            # shellcheck disable=SC2086
+            echo "$design_review_prompt" | claude --dangerously-skip-permissions --print $(get_budget_args)
             echo ""
         fi
     fi
@@ -4161,7 +4259,8 @@ HELP
     validate_prompt "$conversion_prompt" "fix-conversion"
 
     # Run Claude to do the conversion
-    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print
+    # shellcheck disable=SC2086
+    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print $(get_budget_args)
 
     # Verify SPEC.md was created
     if [[ ! -f "$fix_dir/SPEC.md" ]]; then
@@ -5282,7 +5381,8 @@ HELP
     trap "rm -f '$temp_output'" RETURN
 
     # Call Claude to generate tests
-    echo "$prompt" | claude --dangerously-skip-permissions --print > "$temp_output" 2>&1
+    # shellcheck disable=SC2086
+    echo "$prompt" | claude --dangerously-skip-permissions --print $(get_budget_args) > "$temp_output" 2>&1
     local exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
@@ -5767,6 +5867,8 @@ ENVIRONMENT VARIABLES:
     RETRY_DELAY         Initial retry delay in seconds, doubles each retry (default: 5)
     ITERATION_TIMEOUT   Max seconds per iteration before timeout (default: 600)
     MAX_CONSECUTIVE_FAILURES  Stop after N consecutive failures (default: 3)
+    CR_MAX_BUDGET        Total budget in USD for the entire run
+    CR_MAX_ITER_BUDGET   Per-iteration budget in USD (passed to --max-budget-usd)
 
 RESILIENCE:
     - Per-iteration timeout prevents stuck iterations
