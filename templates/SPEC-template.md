@@ -52,6 +52,21 @@ TASK ORDERING RULES (ENFORCED):
   - Validate: Run per-task quality gates on changed files
   - Visual: `agent-browser screenshot localhost:PORT/path` (REQUIRED FOR UI)
 
+<!--
+SUB-TASK SUPPORT:
+Large tasks can be broken into sub-tasks using indented checkboxes:
+
+- [ ] Task 4: [Large feature]
+  - [ ] Sub-task 4a: [First piece]
+  - [ ] Sub-task 4b: [Second piece]
+  - [ ] Sub-task 4c: [Third piece]
+
+Rules:
+- A parent task is complete only when ALL sub-tasks are checked
+- Sub-tasks count individually toward progress
+- Agents can add sub-tasks dynamically during implementation
+-->
+
 #### Phase 3: Integration (After all implementation tasks)
 - [ ] Task N: Integration tests and final validation
   - Run: Full test suite, E2E tests
@@ -159,6 +174,16 @@ Examples by stack:
 Add discoveries here during implementation:
 - Iteration 2: Discovered we need to update the API types first
 - Iteration 3: Found existing utility function we can reuse
+-->
+
+<!--
+CONTINUATION MARKERS:
+If a task spans multiple iterations, write a marker here so the next iteration
+knows exactly where to pick up:
+
+<!-- CONTINUATION: description of current state and what remains -->
+
+Remove the marker when the work is complete.
 -->
 
 ## Iteration Log
