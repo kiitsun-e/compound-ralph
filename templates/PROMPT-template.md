@@ -566,12 +566,12 @@ jq '.learnings += [{
 }]' .cr/learnings.json > .cr/learnings.json.tmp && mv .cr/learnings.json.tmp .cr/learnings.json
 ```
 
-### 8.3 Update Frontmatter
+### 8.4 Update Frontmatter
 
 - Increment `iteration_count`
 - Update `status` if needed
 
-### 8.4 Add to Iteration Log
+### 8.5 Add to Iteration Log
 
 ```markdown
 ### Iteration X (YYYY-MM-DD HH:MM)

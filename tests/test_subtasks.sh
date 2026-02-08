@@ -18,7 +18,7 @@ eval "$(sed -n '/^get_continuation_marker()/,/^}/p' "$CR_DIR/cr")"
 PASS=0
 FAIL=0
 TMPDIR=$(mktemp -d)
-trap "rm -rf $TMPDIR" EXIT
+trap 'rm -rf "$TMPDIR"' EXIT
 
 assert_eq() {
     local description="$1"

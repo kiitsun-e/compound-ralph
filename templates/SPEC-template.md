@@ -181,8 +181,9 @@ CONTINUATION MARKERS:
 If a task spans multiple iterations, write a marker here so the next iteration
 knows exactly where to pick up:
 
-<!-- CONTINUATION: description of current state and what remains -->
+  CONTINUATION: description of current state and what remains
 
+Use the format: <!-- CONTINUATION: ... -->  (as a standalone HTML comment)
 Remove the marker when the work is complete.
 -->
 

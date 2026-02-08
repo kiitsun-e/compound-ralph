@@ -196,10 +196,6 @@ count_tasks() {
     local parent_pending=false
     local prev_was_parent=false
 
-    # Determine checkbox patterns based on mode
-    local pending_pat='- \[ \]'
-    local completed_pat='- \[x\]'
-
     while IFS= read -r line; do
         # Top-level task: starts with "- [ ]" or "- [x]" (no leading whitespace)
         if [[ "$line" =~ ^-\ \[\ \] ]] || [[ "$line" =~ ^-\ \[x\] ]]; then
