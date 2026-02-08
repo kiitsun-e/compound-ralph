@@ -3275,7 +3275,6 @@ create_parallel_worktrees() {
     worktree_base="$(git rev-parse --show-toplevel)/.cr/worktrees"
     mkdir -p "$worktree_base"
 
-    local -a paths=()
     for task_num in "${task_nums[@]}"; do
         local wt_name="cr-parallel-${task_num}-$$"
         local wt_path="$worktree_base/$wt_name"
@@ -3325,10 +3324,14 @@ run_parallel_batch() {
     # Budget splitting: if CR_MAX_BUDGET is set, divide among agents (forward-compatible with PR #30)
     local budget_args=""
     if [[ -n "$CR_MAX_BUDGET" ]]; then
+        # Validate budget is a number to prevent awk injection
+        if ! [[ "$CR_MAX_BUDGET" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+            log_error "CR_MAX_BUDGET must be a number, got: $CR_MAX_BUDGET"
+            return 1
+        fi
         local agent_count=${#agents[@]}
-        # Use awk for floating point division
         local per_agent_budget
-        per_agent_budget=$(awk "BEGIN {printf \"%.2f\", $CR_MAX_BUDGET / $agent_count}")
+        per_agent_budget=$(awk -v total="$CR_MAX_BUDGET" -v count="$agent_count" 'BEGIN {printf "%.2f", total / count}')
         budget_args="--max-budget-usd $per_agent_budget"
         log_info "Budget: \$$CR_MAX_BUDGET total, \$$per_agent_budget per agent"
     fi
@@ -3650,8 +3653,8 @@ run_parallel_implement() {
                 # Mark task as complete in SPEC.md
                 # Escape special regex chars in task text for sed
                 local escaped_text
-                escaped_text=$(printf '%s\n' "$tt" | sed 's/[[\.*^$()+?{|]/\\&/g')
-                sed_inplace "s/^- \[ \] ${escaped_text}/- [x] ${escaped_text}/" "$spec_file" 2>/dev/null || true
+                escaped_text=$(printf '%s\n' "$tt" | sed 's/[[\.*^$()+?{|/]/\\&/g')
+                sed_inplace "s|^- \[ \] ${escaped_text}|- [x] ${escaped_text}|" "$spec_file" 2>/dev/null || true
             fi
         done
 
@@ -3666,8 +3669,9 @@ run_parallel_implement() {
 
         if [[ ${#retry_tasks[@]} -gt 0 ]]; then
             log_info "Tasks needing retry: ${retry_tasks[*]}"
-            # These will be picked up as pending tasks if we re-parse,
-            # or they'll be handled in the sequential fallback below.
+            # TODO: Retry logic not yet implemented — failed/conflicted tasks are
+            # left unchecked in SPEC.md and logged, but not re-attempted in subsequent
+            # batches. For now, the user must run sequential mode to pick these up.
         fi
 
         echo ""
