@@ -3266,6 +3266,10 @@ HELP
     # TODO: Could use --output-format json to get exact usage, but that changes
     # output parsing significantly. Simple estimation is good enough for a guard rail.
     if [[ -n "$CR_MAX_BUDGET" ]]; then
+        if [[ -z "$CR_MAX_ITER_BUDGET" ]]; then
+            log_warn "CR_MAX_BUDGET is set but CR_MAX_ITER_BUDGET is not. Budget tracking requires both."
+            log_warn "Set CR_MAX_ITER_BUDGET to enable the total budget guard rail."
+        fi
         mkdir -p .cr
         if [[ ! -f .cr/budget_spent.txt ]]; then
             echo "0" > .cr/budget_spent.txt
@@ -3298,6 +3302,9 @@ HELP
         if [[ -n "$CR_MAX_BUDGET" ]]; then
             local spent
             spent=$(cat .cr/budget_spent.txt 2>/dev/null || echo 0)
+            # Sanitize: default to 0 if file was empty or corrupted
+            spent="${spent// /}"
+            [[ "$spent" =~ ^[0-9]*\.?[0-9]+$ ]] || spent=0
             # Use awk for float comparison (bash doesn't support float arithmetic)
             if awk "BEGIN {exit !($spent >= $CR_MAX_BUDGET)}"; then
                 echo ""
@@ -3476,6 +3483,8 @@ Start by reading both files now."
         if [[ -n "$CR_MAX_BUDGET" ]] && [[ -n "$CR_MAX_ITER_BUDGET" ]]; then
             local prev_spent
             prev_spent=$(cat .cr/budget_spent.txt 2>/dev/null || echo 0)
+            prev_spent="${prev_spent// /}"
+            [[ "$prev_spent" =~ ^[0-9]*\.?[0-9]+$ ]] || prev_spent=0
             awk "BEGIN {printf \"%.2f\", $prev_spent + $CR_MAX_ITER_BUDGET}" > .cr/budget_spent.txt
         fi
 
