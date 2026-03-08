@@ -61,12 +61,10 @@ RETRY_DELAY="${RETRY_DELAY:-5}"
 ITERATION_TIMEOUT="${ITERATION_TIMEOUT:-600}"  # 10 minutes per iteration
 MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-3}"
 
-# Budget controls (Issue 4 from REVIEW.md)
-# Per-iteration budget passed to claude --max-budget-usd
-CR_MAX_ITER_BUDGET="${CR_MAX_ITER_BUDGET:-}"
-# Total budget for the entire run — stops the loop if exceeded
-# Tracked via .cr/budget_spent.txt across iterations
-CR_MAX_BUDGET="${CR_MAX_BUDGET:-}"
+# Budget controls
+CR_MAX_ITER_BUDGET="${CR_MAX_ITER_BUDGET:-}"  # per-iteration cap passed to --max-budget-usd
+CR_MAX_BUDGET="${CR_MAX_BUDGET:-}"             # total run cap; tracked in .cr/budget_spent.txt
+CR_LAST_ITER_COST_USD=""                       # actual cost of last iteration (parsed from JSON output)
 
 # Agent/machine invocation flags
 NON_INTERACTIVE=false
@@ -232,9 +230,14 @@ run_claude_with_retry() {
         local budget_args
         budget_args=$(get_budget_args)
 
+        # When total budget tracking is active, request JSON output so we can extract
+        # the actual cost spent (total_cost_usd) instead of estimating from the cap.
+        local format_args=""
+        [[ -n "$CR_MAX_BUDGET" ]] && format_args="--output-format json"
+
         # Start Claude in background
         # shellcheck disable=SC2086
-        echo "$prompt" | claude --dangerously-skip-permissions --print $budget_args > "$temp_output" 2>&1 &
+        echo "$prompt" | claude --dangerously-skip-permissions --print $budget_args $format_args > "$temp_output" 2>&1 &
         local claude_pid=$!
         CHILD_PIDS+=("$claude_pid")
 
@@ -270,9 +273,37 @@ run_claude_with_retry() {
         set -e
 
         # Read output from temp file
-        local output=""
+        local raw_output=""
         if [[ -f "$temp_output" ]]; then
-            output=$(cat "$temp_output")
+            raw_output=$(cat "$temp_output")
+        fi
+
+        # When JSON format is active, extract .result for display and .total_cost_usd for tracking
+        local output="$raw_output"
+        if [[ -n "$format_args" ]] && [[ -n "$raw_output" ]]; then
+            local json_result json_cost
+            json_result=$(python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.read())
+    print(d.get('result', ''))
+except Exception:
+    pass
+" <<< "$raw_output" 2>/dev/null || true)
+            json_cost=$(python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.read())
+    cost = d.get('total_cost_usd')
+    if cost is not None:
+        print(cost)
+except Exception:
+    pass
+" <<< "$raw_output" 2>/dev/null || true)
+            # Use extracted text for display; keep raw_output for error pattern matching fallback
+            [[ -n "$json_result" ]] && output="$json_result"
+            # Store actual cost globally for budget tracking (cleared on each retry)
+            CR_LAST_ITER_COST_USD="${json_cost:-}"
         fi
 
         # Write output to log and terminal
@@ -292,8 +323,10 @@ run_claude_with_retry() {
             is_transient=true
             log_warn "Claude exited with code $exit_code"
         elif [[ $output_length -lt 100 ]]; then
-            # Short output - check if it's an error message
-            if echo "$output" | grep -qiE "No messages returned|ECONNRESET|ETIMEDOUT|rate.limit exceeded|503 Service|502 Bad Gateway|overloaded|ENOTFOUND|socket hang up"; then
+            # Short output - check if it's an error message (check both parsed result and raw output)
+            local check_output="$output"
+            [[ -z "$check_output" ]] && check_output="$raw_output"
+            if echo "$check_output" | grep -qiE "No messages returned|ECONNRESET|ETIMEDOUT|rate.limit exceeded|503 Service|502 Bad Gateway|overloaded|ENOTFOUND|socket hang up"; then
                 is_transient=true
                 log_warn "Transient API error detected in output"
             elif [[ -z "$output" ]]; then
@@ -3260,11 +3293,11 @@ HELP
     echo "Press Ctrl+C to stop at any time."
     echo ""
 
-    # Initialize budget tracking file
-    # Assumption: we estimate cost as iteration_count * CR_MAX_ITER_BUDGET
-    # since exact per-iteration cost isn't available without --output-format json.
-    # TODO: Could use --output-format json to get exact usage, but that changes
-    # output parsing significantly. Simple estimation is good enough for a guard rail.
+    # Initialize budget tracking file.
+    # Actual cost per iteration is read from claude's JSON output (--output-format json)
+    # via CR_LAST_ITER_COST_USD. CR_MAX_ITER_BUDGET is used as a fallback if the parse
+    # fails. Spend accumulates across runs on the same spec — delete .cr/budget_spent.txt
+    # to reset the counter for a fresh run.
     if [[ -n "$CR_MAX_BUDGET" ]]; then
         if [[ -z "$CR_MAX_ITER_BUDGET" ]]; then
             log_warn "CR_MAX_BUDGET is set but CR_MAX_ITER_BUDGET is not. Budget tracking requires both."
@@ -3304,7 +3337,10 @@ HELP
             spent=$(cat .cr/budget_spent.txt 2>/dev/null || echo 0)
             # Sanitize: default to 0 if file was empty or corrupted
             spent="${spent// /}"
-            [[ "$spent" =~ ^[0-9]*\.?[0-9]+$ ]] || spent=0
+            if ! [[ "$spent" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+                log_warn "Budget tracking file corrupted (value: '${spent}'). Resetting to 0. Check .cr/budget_spent.txt"
+                spent=0
+            fi
             # Use awk for float comparison (bash doesn't support float arithmetic)
             if awk "BEGIN {exit !($spent >= $CR_MAX_BUDGET)}"; then
                 echo ""
@@ -3479,13 +3515,23 @@ Start by reading both files now."
         # Success - reset consecutive failures
         CONSECUTIVE_FAILURES=0
 
-        # Track budget spent (estimate: iteration_budget per successful iteration)
+        # Track budget spent using actual cost from JSON output (CR_LAST_ITER_COST_USD).
+        # Falls back to CR_MAX_ITER_BUDGET cap if actual cost wasn't captured.
         if [[ -n "$CR_MAX_BUDGET" ]] && [[ -n "$CR_MAX_ITER_BUDGET" ]]; then
             local prev_spent
             prev_spent=$(cat .cr/budget_spent.txt 2>/dev/null || echo 0)
             prev_spent="${prev_spent// /}"
-            [[ "$prev_spent" =~ ^[0-9]*\.?[0-9]+$ ]] || prev_spent=0
-            awk "BEGIN {printf \"%.2f\", $prev_spent + $CR_MAX_ITER_BUDGET}" > .cr/budget_spent.txt
+            if ! [[ "$prev_spent" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+                log_warn "Budget tracking file corrupted (value: '${prev_spent}'). Resetting to 0. Check .cr/budget_spent.txt"
+                prev_spent=0
+            fi
+            # Use actual cost if available; fall back to per-iteration cap
+            local iter_cost="${CR_LAST_ITER_COST_USD:-$CR_MAX_ITER_BUDGET}"
+            if ! [[ "$iter_cost" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+                iter_cost="$CR_MAX_ITER_BUDGET"
+            fi
+            awk "BEGIN {printf \"%.4f\", $prev_spent + $iter_cost}" > .cr/budget_spent.txt
+            [[ -n "$CR_LAST_ITER_COST_USD" ]] && log_info "Iteration cost: \$${CR_LAST_ITER_COST_USD} (actual)"
         fi
 
         # Run per-iteration checks (tests, lint, typecheck)
