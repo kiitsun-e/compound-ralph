@@ -1240,10 +1240,11 @@ get_learnings_summary() {
 
     local raw_output=""
     if command -v jq &>/dev/null; then
+        # gsub("\n";" ") ensures each entry is a single line — safe for tail-based trimming below
         if [[ -n "$category" ]]; then
-            raw_output=$(jq -r ".learnings | map(select(.category == \"$category\")) | .[-$limit:] | .[] | \"[\(.category)] \(.learning)\"" "$learnings_file" 2>/dev/null)
+            raw_output=$(jq -r ".learnings | map(select(.category == \"$category\")) | .[-$limit:] | .[] | \"[\(.category)] \(.learning | gsub(\"\n\";\" \"))\"" "$learnings_file" 2>/dev/null)
         else
-            raw_output=$(jq -r ".learnings | .[-$limit:] | .[] | \"[\(.category)] \(.learning)\"" "$learnings_file" 2>/dev/null)
+            raw_output=$(jq -r ".learnings | .[-$limit:] | .[] | \"[\(.category)] \(.learning | gsub(\"\n\";\" \"))\"" "$learnings_file" 2>/dev/null)
         fi
     else
         # Fallback: just show the file
@@ -1252,7 +1253,7 @@ get_learnings_summary() {
 
     # Apply char cap if set (0 = no cap, used by display commands)
     if [[ "$max_chars" -gt 0 ]] && [[ ${#raw_output} -gt $max_chars ]]; then
-        # Trim oldest entries (from top) to fit within cap
+        # Trim oldest entries one-per-line (safe: jq gsub above guarantees one line = one entry)
         while [[ ${#raw_output} -gt $max_chars ]] && [[ $(printf '%s\n' "$raw_output" | wc -l) -gt 1 ]]; do
             raw_output=$(printf '%s' "$raw_output" | tail -n +2)
         done
@@ -1267,8 +1268,7 @@ get_learnings_summary() {
 
 # Get context for injection into prompts
 # Returns formatted context string from learnings.json, capped at CR_MAX_CONTEXT_CHARS.
-# Truncation strategy: keep fix entries (prevent regression), then most recent entries.
-# Truncates at entry boundaries — never cuts a learning in half.
+# Priority: fix > pattern > discovery. Oldest entries trimmed first.
 get_context_for_prompt() {
     local max_chars="${CR_MAX_CONTEXT_CHARS:-2000}"
     local learnings_file=".cr/learnings.json"
@@ -1289,13 +1289,16 @@ EOF
         return
     fi
 
-    # Collect entries as arrays (newest last from jq, which is what we want to keep)
+    # Collect entries as arrays (newest last from jq, which is what we want to keep).
+    # gsub("\n";" ") ensures each entry is a single line — safe for tail-based trimming below.
     local fix_entries discovery_entries pattern_entries
-    fix_entries=$(jq -r '.learnings // [] | map(select(.category == "fix")) | .[-10:] | .[] | "- " + .learning' "$learnings_file" 2>/dev/null || echo "")
-    discovery_entries=$(jq -r '.learnings // [] | map(select(.category == "discovery" or .category == "success")) | .[-10:] | .[] | "- " + .learning' "$learnings_file" 2>/dev/null || echo "")
-    pattern_entries=$(jq -r '.learnings // [] | map(select(.category == "pattern")) | .[-10:] | .[] | "- " + .learning' "$learnings_file" 2>/dev/null || echo "")
+    fix_entries=$(jq -r '.learnings // [] | map(select(.category == "fix")) | .[-10:] | .[] | "- " + (.learning | gsub("\n";" "))' "$learnings_file" 2>/dev/null || echo "")
+    discovery_entries=$(jq -r '.learnings // [] | map(select(.category == "discovery" or .category == "success")) | .[-10:] | .[] | "- " + (.learning | gsub("\n";" "))' "$learnings_file" 2>/dev/null || echo "")
+    pattern_entries=$(jq -r '.learnings // [] | map(select(.category == "pattern")) | .[-10:] | .[] | "- " + (.learning | gsub("\n";" "))' "$learnings_file" 2>/dev/null || echo "")
 
     # Helper: assemble output from current entry vars. Uses a truncation header when trimming occurred.
+    # NOTE: intentionally reads $fix_entries, $discovery_entries, $pattern_entries from the
+    # enclosing get_context_for_prompt scope (bash dynamic scoping). Do not call from elsewhere.
     _build_context_output() {
         local header="${1:-}"
         printf '%s' "${header}## Accumulated Context (from previous iterations)
@@ -1319,8 +1322,8 @@ ${pattern_entries:-None yet}"
         return
     fi
 
-    # Truncation needed. Keep fix entries (prevent regression), trim discovery then pattern
-    # from the oldest (top) until we fit. Always truncates at entry boundaries.
+    # Truncation needed. Priority: fix > pattern > discovery. Oldest entries trimmed first.
+    # Safe to trim one line at a time — jq gsub above guarantees one line = one entry.
     local truncation_header
     truncation_header="(Showing most recent learnings — older entries truncated to stay within context budget)
 
@@ -3159,7 +3162,7 @@ PROMPT
 cmd_implement() {
     if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
         cat << 'HELP'
-Usage: cr implement [spec-dir] [--json] [--non-interactive] [--max-context-chars N]
+Usage: cr implement [spec-dir] [--json] [--non-interactive]
 
 Start the autonomous implementation loop. Reads SPEC.md, executes one
 task per iteration with quality gate backpressure.
@@ -3168,7 +3171,10 @@ Options:
     spec-dir                Path to spec directory (auto-detected if omitted)
     --json                  Output JSON summary on completion/failure
     --non-interactive       Auto-confirm prompts (for CI/agent use)
+
+Global flags (pass before the subcommand):
     --max-context-chars N   Cap learnings context injected into prompts (default: 2000)
+                            See 'cr help' for all global flags.
 
 Environment:
     MAX_ITERATIONS=50              Maximum loop iterations
@@ -3183,7 +3189,7 @@ Examples:
     cr implement                              # Auto-find active spec
     cr implement specs/dark-mode/             # Specific spec
     MAX_ITERATIONS=100 cr implement           # Override max iterations
-    cr implement --max-context-chars 4000     # Larger context budget
+    cr --max-context-chars 4000 implement     # Larger context budget (global flag)
 HELP
         return 0
     fi
@@ -5027,11 +5033,11 @@ HELP
     if [[ -n "$category" ]]; then
         echo "Category: $category (last $limit)"
         echo "---"
-        get_learnings_summary "$category" "$limit" 0
+        get_learnings_summary "$category" "$limit" 0  # 0 = no char cap for display
     else
         echo "All categories (last $limit)"
         echo "---"
-        get_learnings_summary "" "$limit" 0
+        get_learnings_summary "" "$limit" 0  # 0 = no char cap for display
     fi
 
     echo ""
@@ -5714,7 +5720,6 @@ COMMANDS:
     implement [spec]    Start autonomous implementation loop
         [--json]        Output final JSON summary on completion/failure
         [--non-interactive] Auto-confirm all prompts (for CI/agent use)
-        [--max-context-chars N] Cap learnings context chars (default: 2000)
                         Reads SPEC.md, executes one task per iteration
                         Runs backpressure (tests, lint) each iteration
                         Auto-detects fix specs (fixes/code, fixes/design)
