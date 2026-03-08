@@ -5840,28 +5840,24 @@ main() {
 
     # Parse global flags before command dispatch
     local args=()
-    local skip_next=false
-    for i in $(seq 1 $#); do
-        if [[ "$skip_next" == "true" ]]; then
-            skip_next=false
-            continue
-        fi
-        local arg="${!i}"
-        local next_i=$((i + 1))
-        local next_arg="${!next_i:-}"
+    while [[ $# -gt 0 ]]; do
+        local arg="$1"
         case "$arg" in
             --non-interactive) NON_INTERACTIVE=true ;;
             --json) JSON_OUTPUT=true ;;
             --model)
-                CR_MODEL="$next_arg"
-                skip_next=true
+                [[ -z "${2:-}" ]] && { log_error "--model requires a value"; exit 1; }
+                CR_MODEL="$2"
+                shift
                 ;;
             --fallback-model)
-                CR_FALLBACK_MODEL="$next_arg"
-                skip_next=true
+                [[ -z "${2:-}" ]] && { log_error "--fallback-model requires a value"; exit 1; }
+                CR_FALLBACK_MODEL="$2"
+                shift
                 ;;
             *) args+=("$arg") ;;
         esac
+        shift
     done
     set -- "${args[@]+"${args[@]}"}"
 
