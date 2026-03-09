@@ -282,24 +282,7 @@ run_claude_with_retry() {
         local output="$raw_output"
         if [[ -n "$format_args" ]] && [[ -n "$raw_output" ]]; then
             local json_result json_cost
-            json_result=$(python3 -c "
-import sys, json
-try:
-    d = json.loads(sys.stdin.read())
-    print(d.get('result', ''))
-except Exception:
-    pass
-" <<< "$raw_output" 2>/dev/null || true)
-            json_cost=$(python3 -c "
-import sys, json
-try:
-    d = json.loads(sys.stdin.read())
-    cost = d.get('total_cost_usd')
-    if cost is not None:
-        print(cost)
-except Exception:
-    pass
-" <<< "$raw_output" 2>/dev/null || true)
+            { read -r json_result; read -r json_cost; } < <(jq -r '(.result // ""), (.total_cost_usd // "")' <<< "$raw_output" 2>/dev/null || printf '\n\n')
             # Use extracted text for display; keep raw_output for error pattern matching fallback
             [[ -n "$json_result" ]] && output="$json_result"
             # Store actual cost globally for budget tracking (cleared on each retry)
@@ -3531,7 +3514,11 @@ Start by reading both files now."
                 iter_cost="$CR_MAX_ITER_BUDGET"
             fi
             awk "BEGIN {printf \"%.4f\", $prev_spent + $iter_cost}" > .cr/budget_spent.txt
-            [[ -n "$CR_LAST_ITER_COST_USD" ]] && log_info "Iteration cost: \$${CR_LAST_ITER_COST_USD} (actual)"
+            if [[ -n "$CR_LAST_ITER_COST_USD" ]]; then
+                log_info "Iteration cost: \$${CR_LAST_ITER_COST_USD} (actual)"
+            else
+                log_info "Iteration cost: \$${iter_cost} (estimated)"
+            fi
         fi
 
         # Run per-iteration checks (tests, lint, typecheck)
