@@ -61,6 +61,11 @@ RETRY_DELAY="${RETRY_DELAY:-5}"
 ITERATION_TIMEOUT="${ITERATION_TIMEOUT:-600}"  # 10 minutes per iteration
 MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-3}"
 
+# Model selection: override via env vars or --model/--fallback-model CLI flags
+# CLI flags take precedence over env vars. Empty string = use Claude Code default.
+CR_MODEL="${CR_MODEL:-}"
+CR_FALLBACK_MODEL="${CR_FALLBACK_MODEL:-}"
+
 # Agent/machine invocation flags
 NON_INTERACTIVE=false
 JSON_OUTPUT=false
@@ -142,6 +147,16 @@ log_error() {
 
 log_step() {
     echo -e "\n${CYAN}${BOLD}=== $1 ===${NC}\n"
+}
+
+# Build --model/--fallback-model args for claude invocations.
+# Returns space-separated flags ready to be word-split into a command.
+# Uses global CR_MODEL / CR_FALLBACK_MODEL (set via env vars or CLI flags).
+build_model_args() {
+    local args=""
+    [[ -n "$CR_MODEL" ]] && args="--model $CR_MODEL"
+    [[ -n "$CR_FALLBACK_MODEL" ]] && args="$args --fallback-model $CR_FALLBACK_MODEL"
+    echo "$args"
 }
 
 # Portable sed in-place edit (macOS uses -i '', Linux uses -i)
@@ -319,7 +334,10 @@ run_claude_with_retry() {
         set +e
 
         # Start Claude in background
-        echo "$prompt" | claude --dangerously-skip-permissions --print > "$temp_output" 2>&1 &
+        # shellcheck disable=SC2046 # Intentional word splitting on model_args
+        local model_args
+        model_args=$(build_model_args)
+        echo "$prompt" | claude --dangerously-skip-permissions --print $model_args > "$temp_output" 2>&1 &
         local claude_pid=$!
         CHILD_PIDS+=("$claude_pid")
 
@@ -2582,7 +2600,8 @@ HELP
     validate_prompt "$converse_prompt" "converse"
 
     # Run Claude interactively
-    claude --dangerously-skip-permissions "$converse_prompt"
+    # shellcheck disable=SC2046 # Intentional word splitting on model args
+    claude --dangerously-skip-permissions $(build_model_args) "$converse_prompt"
 
     echo ""
     log_success "Conversation complete!"
@@ -2702,7 +2721,8 @@ HELP
     validate_prompt "$research_prompt" "research"
 
     # Run Claude interactively
-    claude --dangerously-skip-permissions "$research_prompt"
+    # shellcheck disable=SC2046 # Intentional word splitting on model args
+    claude --dangerously-skip-permissions $(build_model_args) "$research_prompt"
 
     echo ""
     log_success "Research complete!"
@@ -2827,7 +2847,8 @@ and recommendations that MUST inform your plan:"
 
     # If knowledge context exists, prime Claude with it before planning
     if [[ -n "$knowledge_context" ]]; then
-        claude --dangerously-skip-permissions "Before starting the plan, read all knowledge files for context:
+        # shellcheck disable=SC2046 # Intentional word splitting on model args
+        claude --dangerously-skip-permissions $(build_model_args) "Before starting the plan, read all knowledge files for context:
 ${knowledge_context}
 
 After reading those files, proceed with:
@@ -2837,7 +2858,8 @@ The plan MUST incorporate findings from the knowledge files. Reference specific
 decisions, risks, and recommendations from the research/conversation phases."
     else
         # Run Claude for planning with auto-permissions (original behavior)
-        claude --dangerously-skip-permissions "/workflows:plan $description"
+        # shellcheck disable=SC2046 # Intentional word splitting on model args
+        claude --dangerously-skip-permissions $(build_model_args) "/workflows:plan $description"
     fi
 
     echo ""
@@ -2930,7 +2952,8 @@ HELP
     validate_prompt "$conversion_prompt" "spec-conversion"
 
     # Run Claude to do the conversion
-    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print
+    # shellcheck disable=SC2046 # Intentional word splitting on model args
+    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print $(build_model_args)
 
     # Verify SPEC.md was created
     if [[ ! -f "$spec_dir/SPEC.md" ]]; then
@@ -3830,7 +3853,7 @@ run_parallel_implement() {
 cmd_implement() {
     if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
         cat << 'HELP'
-Usage: cr implement [spec-dir] [--json] [--non-interactive] [--parallel [max-agents]]
+Usage: cr implement [spec-dir] [--json] [--non-interactive] [--parallel [max-agents]] [--model MODEL] [--fallback-model MODEL]
 
 Start the autonomous implementation loop. Reads SPEC.md, executes one
 task per iteration with quality gate backpressure.
@@ -3840,6 +3863,8 @@ Options:
     --json              Output JSON summary on completion/failure
     --non-interactive   Auto-confirm prompts (for CI/agent use)
     --parallel [N]      Run independent tasks in parallel using N agents (default: 3)
+    --model MODEL       Claude model to use (e.g. claude-sonnet-4-5-20250929)
+    --fallback-model MODEL  Fallback model when primary is overloaded
 
 Environment:
     MAX_ITERATIONS=50              Maximum loop iterations
@@ -3849,9 +3874,9 @@ Environment:
     ITERATION_TIMEOUT=600          Max seconds per iteration before timeout
     MAX_CONSECUTIVE_FAILURES=3     Stop after N consecutive failures
     CR_MAX_PARALLEL=3              Default max parallel agents
-    CR_MODEL=                      Model to use (forward-compatible with PR #28)
-    CR_FALLBACK_MODEL=             Fallback model (forward-compatible with PR #28)
-    CR_MAX_BUDGET=                 Total budget in USD (forward-compatible with PR #30)
+    CR_MODEL                       Claude model (overridden by --model flag)
+    CR_FALLBACK_MODEL              Fallback model (overridden by --fallback-model flag)
+    CR_MAX_BUDGET                  Total budget in USD (forward-compatible with PR #30)
 
 Examples:
     cr implement                        # Auto-find active spec
@@ -3859,6 +3884,7 @@ Examples:
     cr implement --parallel             # Parallel with default 3 agents
     cr implement specs/feature/ --parallel 5   # Up to 5 parallel agents
     MAX_ITERATIONS=100 cr implement     # Override max iterations
+    cr implement --model claude-sonnet-4-5-20250929  # Use Sonnet
 HELP
         return 0
     fi
@@ -4697,9 +4723,11 @@ Run the review now."
             team_review_prompt="${team_review_prompt//__TEAM_MODEL_ARG__/$team_model_arg}"
             validate_prompt "$team_review_prompt" "review-team"
 
-            echo "$team_review_prompt" | claude --dangerously-skip-permissions --print
+            # shellcheck disable=SC2046 # Intentional word splitting on model args
+            echo "$team_review_prompt" | claude --dangerously-skip-permissions --print $(build_model_args)
         else
-            echo "$code_review_prompt" | claude --dangerously-skip-permissions --print
+            # shellcheck disable=SC2046 # Intentional word splitting on model args
+            echo "$code_review_prompt" | claude --dangerously-skip-permissions --print $(build_model_args)
         fi
         echo ""
     fi
@@ -4757,7 +4785,8 @@ SPEC FILE: $abs_spec_dir/SPEC.md"
             design_review_prompt="${design_review_prompt//__DESIGN_SPEC_TAG__/$design_spec_tag}"
             validate_prompt "$design_review_prompt" "review-design"
 
-            echo "$design_review_prompt" | claude --dangerously-skip-permissions --print
+            # shellcheck disable=SC2046 # Intentional word splitting on model args
+            echo "$design_review_prompt" | claude --dangerously-skip-permissions --print $(build_model_args)
             echo ""
         fi
     fi
@@ -4991,7 +5020,8 @@ HELP
     validate_prompt "$conversion_prompt" "fix-conversion"
 
     # Run Claude to do the conversion
-    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print
+    # shellcheck disable=SC2046 # Intentional word splitting on model args
+    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print $(build_model_args)
 
     # Verify SPEC.md was created
     if [[ ! -f "$fix_dir/SPEC.md" ]]; then
@@ -5214,7 +5244,8 @@ HELP
     validate_prompt "$compound_prompt" "compound"
 
     # Run Claude interactively
-    claude --dangerously-skip-permissions "$compound_prompt"
+    # shellcheck disable=SC2046 # Intentional word splitting on model args
+    claude --dangerously-skip-permissions $(build_model_args) "$compound_prompt"
 
     echo ""
     log_success "Knowledge extraction complete!"
@@ -6109,7 +6140,8 @@ HELP
     trap "rm -f '$temp_output'" RETURN
 
     # Call Claude to generate tests
-    echo "$prompt" | claude --dangerously-skip-permissions --print > "$temp_output" 2>&1
+    # shellcheck disable=SC2046 # Intentional word splitting on model args
+    echo "$prompt" | claude --dangerously-skip-permissions --print $(build_model_args) > "$temp_output" 2>&1
     local exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
@@ -6590,6 +6622,8 @@ GLOBAL FLAGS:
     --non-interactive   Auto-confirm all interactive prompts (for CI/agent use)
     --json              Output machine-readable JSON (implies NO_COLOR)
                         Supported by: status, implement
+    --model MODEL       Claude model for all invocations (overrides CR_MODEL)
+    --fallback-model MODEL  Fallback model when primary is overloaded
 
 ENVIRONMENT VARIABLES:
     NO_COLOR            Disable colored output (https://no-color.org/)
@@ -6600,8 +6634,8 @@ ENVIRONMENT VARIABLES:
     ITERATION_TIMEOUT   Max seconds per iteration before timeout (default: 600)
     MAX_CONSECUTIVE_FAILURES  Stop after N consecutive failures (default: 3)
     CR_MAX_PARALLEL     Max parallel agents for --parallel mode (default: 3)
-    CR_MODEL            Model for claude --print (forward-compatible with PR #28)
-    CR_FALLBACK_MODEL   Fallback model (forward-compatible with PR #28)
+    CR_MODEL            Claude model to use (e.g. claude-sonnet-4-5-20250929)
+    CR_FALLBACK_MODEL   Fallback model when primary is overloaded
     CR_MAX_BUDGET       Total budget in USD, split among parallel agents (PR #30)
 
 RESILIENCE:
@@ -6638,12 +6672,24 @@ main() {
 
     # Parse global flags before command dispatch
     local args=()
-    for arg in "$@"; do
+    while [[ $# -gt 0 ]]; do
+        local arg="$1"
         case "$arg" in
             --non-interactive) NON_INTERACTIVE=true ;;
             --json) JSON_OUTPUT=true ;;
+            --model)
+                [[ -z "${2:-}" ]] && { log_error "--model requires a value"; exit 1; }
+                CR_MODEL="$2"
+                shift
+                ;;
+            --fallback-model)
+                [[ -z "${2:-}" ]] && { log_error "--fallback-model requires a value"; exit 1; }
+                CR_FALLBACK_MODEL="$2"
+                shift
+                ;;
             *) args+=("$arg") ;;
         esac
+        shift
     done
     set -- "${args[@]+"${args[@]}"}"
 
