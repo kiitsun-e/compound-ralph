@@ -60,6 +60,7 @@ MAX_RETRIES="${MAX_RETRIES:-3}"
 RETRY_DELAY="${RETRY_DELAY:-5}"
 ITERATION_TIMEOUT="${ITERATION_TIMEOUT:-600}"  # 10 minutes per iteration
 MAX_CONSECUTIVE_FAILURES="${MAX_CONSECUTIVE_FAILURES:-3}"
+CR_MAX_CONTEXT_CHARS="${CR_MAX_CONTEXT_CHARS:-2000}"  # Max chars for learnings context injected into prompts (Issue 3)
 
 # Model selection: override via env vars or --model/--fallback-model CLI flags
 # CLI flags take precedence over env vars. Empty string = use Claude Code default.
@@ -1349,24 +1350,39 @@ add_learning() {
 }
 
 # Get recent learnings summary for context
-# Usage: get_learnings_summary [category] [limit]
+# Usage: get_learnings_summary [category] [limit] [max_chars]
+# max_chars: optional char cap (defaults to CR_MAX_CONTEXT_CHARS for prompt injection).
+#            Pass 0 to disable cap (e.g. for display commands).
 get_learnings_summary() {
     local category="${1:-}"
     local limit="${2:-10}"
+    local max_chars="${3:-$CR_MAX_CONTEXT_CHARS}"
     local learnings_file=".cr/learnings.json"
 
     [[ ! -f "$learnings_file" ]] && return
 
+    local raw_output=""
     if command -v jq &>/dev/null; then
+        # gsub("\n";" ") ensures each entry is a single line — safe for tail-based trimming below
         if [[ -n "$category" ]]; then
-            jq -r ".learnings | map(select(.category == \"$category\")) | .[-$limit:] | .[] | \"[\(.category)] \(.learning)\"" "$learnings_file" 2>/dev/null
+            raw_output=$(jq -r ".learnings | map(select(.category == \"$category\")) | .[-$limit:] | .[] | \"[\(.category)] \(.learning | gsub(\"\n\";\" \"))\"" "$learnings_file" 2>/dev/null)
         else
-            jq -r ".learnings | .[-$limit:] | .[] | \"[\(.category)] \(.learning)\"" "$learnings_file" 2>/dev/null
+            raw_output=$(jq -r ".learnings | .[-$limit:] | .[] | \"[\(.category)] \(.learning | gsub(\"\n\";\" \"))\"" "$learnings_file" 2>/dev/null)
         fi
     else
         # Fallback: just show the file
-        tail -50 "$learnings_file"
+        raw_output=$(tail -50 "$learnings_file")
     fi
+
+    # Apply char cap if set (0 = no cap, used by display commands)
+    if [[ "$max_chars" -gt 0 ]] && [[ ${#raw_output} -gt $max_chars ]]; then
+        # Trim oldest entries one-per-line (safe: jq gsub above guarantees one line = one entry)
+        while [[ ${#raw_output} -gt $max_chars ]] && [[ $(printf '%s\n' "$raw_output" | wc -l) -gt 1 ]]; do
+            raw_output=$(printf '%s' "$raw_output" | tail -n +2)
+        done
+    fi
+
+    printf '%s\n' "$raw_output"
 }
 
 #=============================================================================
@@ -1374,34 +1390,87 @@ get_learnings_summary() {
 #=============================================================================
 
 # Get context for injection into prompts
-# Returns formatted context string from learnings.json
+# Returns formatted context string from learnings.json, capped at CR_MAX_CONTEXT_CHARS.
+# Priority: fix > pattern > discovery. Oldest entries trimmed first.
 get_context_for_prompt() {
-    local learnings=""
-    local errors=""
-    local patterns=""
+    local max_chars="${CR_MAX_CONTEXT_CHARS:-2000}"
     local learnings_file=".cr/learnings.json"
 
-    if [[ -f "$learnings_file" ]] && command -v jq &>/dev/null; then
-        # Get discovery/success learnings
-        learnings=$(jq -r '.learnings // [] | map(select(.category == "discovery" or .category == "success")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
-        # Get fix learnings
-        errors=$(jq -r '.learnings // [] | map(select(.category == "fix")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
-        # Get pattern learnings
-        patterns=$(jq -r '.learnings // [] | map(select(.category == "pattern")) | .[-10:] | map("- " + .learning) | join("\n")' "$learnings_file" 2>/dev/null || echo "")
-    fi
-
-    cat << EOF
+    if [[ ! -f "$learnings_file" ]] || ! command -v jq &>/dev/null; then
+        cat << 'EOF'
 ## Accumulated Context (from previous iterations)
 
 ### Learnings
-${learnings:-None yet}
+None yet
 
 ### Errors You've Fixed Before (Don't Repeat)
-${errors:-None yet}
+None yet
 
 ### Patterns Discovered in This Codebase
-${patterns:-None yet}
+None yet
 EOF
+        return
+    fi
+
+    # Collect entries as arrays (newest last from jq, which is what we want to keep).
+    # gsub("\n";" ") ensures each entry is a single line — safe for tail-based trimming below.
+    local fix_entries discovery_entries pattern_entries
+    fix_entries=$(jq -r '.learnings // [] | map(select(.category == "fix")) | .[-10:] | .[] | "- " + (.learning | gsub("\n";" "))' "$learnings_file" 2>/dev/null || echo "")
+    discovery_entries=$(jq -r '.learnings // [] | map(select(.category == "discovery" or .category == "success")) | .[-10:] | .[] | "- " + (.learning | gsub("\n";" "))' "$learnings_file" 2>/dev/null || echo "")
+    pattern_entries=$(jq -r '.learnings // [] | map(select(.category == "pattern")) | .[-10:] | .[] | "- " + (.learning | gsub("\n";" "))' "$learnings_file" 2>/dev/null || echo "")
+
+    # Helper: assemble output from current entry vars. Uses a truncation header when trimming occurred.
+    # NOTE: intentionally reads $fix_entries, $discovery_entries, $pattern_entries from the
+    # enclosing get_context_for_prompt scope (bash dynamic scoping). Do not call from elsewhere.
+    _build_context_output() {
+        local header="${1:-}"
+        printf '%s' "${header}## Accumulated Context (from previous iterations)
+
+### Learnings
+${discovery_entries:-None yet}
+
+### Errors You've Fixed Before (Don't Repeat)
+${fix_entries:-None yet}
+
+### Patterns Discovered in This Codebase
+${pattern_entries:-None yet}"
+    }
+
+    local output
+    output=$(_build_context_output)
+
+    # If within cap, return as-is
+    if [[ ${#output} -le $max_chars ]]; then
+        printf '%s\n' "$output"
+        return
+    fi
+
+    # Truncation needed. Priority: fix > pattern > discovery. Oldest entries trimmed first.
+    # Safe to trim one line at a time — jq gsub above guarantees one line = one entry.
+    local truncation_header
+    truncation_header="(Showing most recent learnings — older entries truncated to stay within context budget)
+
+"
+
+    # Trim discovery entries from oldest first
+    while [[ ${#output} -gt $max_chars ]] && [[ -n "$discovery_entries" ]]; do
+        discovery_entries=$(printf '%s' "$discovery_entries" | tail -n +2)
+        output=$(_build_context_output "$truncation_header")
+    done
+
+    # If still over, trim pattern entries from oldest first
+    while [[ ${#output} -gt $max_chars ]] && [[ -n "$pattern_entries" ]]; do
+        pattern_entries=$(printf '%s' "$pattern_entries" | tail -n +2)
+        output=$(_build_context_output "$truncation_header")
+    done
+
+    # Last resort: trim fix entries from oldest (should be rare)
+    while [[ ${#output} -gt $max_chars ]] && [[ -n "$fix_entries" ]]; do
+        fix_entries=$(printf '%s' "$fix_entries" | tail -n +2)
+        output=$(_build_context_output "$truncation_header")
+    done
+
+    printf '%s\n' "$output"
 }
 
 #=============================================================================
@@ -3859,12 +3928,16 @@ Start the autonomous implementation loop. Reads SPEC.md, executes one
 task per iteration with quality gate backpressure.
 
 Options:
-    spec-dir            Path to spec directory (auto-detected if omitted)
-    --json              Output JSON summary on completion/failure
-    --non-interactive   Auto-confirm prompts (for CI/agent use)
-    --parallel [N]      Run independent tasks in parallel using N agents (default: 3)
-    --model MODEL       Claude model to use (e.g. claude-sonnet-4-5-20250929)
+    spec-dir                Path to spec directory (auto-detected if omitted)
+    --json                  Output JSON summary on completion/failure
+    --non-interactive       Auto-confirm prompts (for CI/agent use)
+    --parallel [N]          Run independent tasks in parallel using N agents (default: 3)
+    --model MODEL           Claude model to use (e.g. claude-sonnet-4-5-20250929)
     --fallback-model MODEL  Fallback model when primary is overloaded
+
+Global flags (pass before the subcommand):
+    --max-context-chars N   Cap learnings context injected into prompts (default: 2000)
+                            See 'cr help' for all global flags.
 
 Environment:
     MAX_ITERATIONS=50              Maximum loop iterations
@@ -3873,18 +3946,20 @@ Environment:
     RETRY_DELAY=5                  Initial retry delay in seconds, doubles each retry
     ITERATION_TIMEOUT=600          Max seconds per iteration before timeout
     MAX_CONSECUTIVE_FAILURES=3     Stop after N consecutive failures
+    CR_MAX_CONTEXT_CHARS=2000      Max chars for learnings context in prompts
     CR_MAX_PARALLEL=3              Default max parallel agents
     CR_MODEL                       Claude model (overridden by --model flag)
     CR_FALLBACK_MODEL              Fallback model (overridden by --fallback-model flag)
     CR_MAX_BUDGET                  Total budget in USD (forward-compatible with PR #30)
 
 Examples:
-    cr implement                        # Auto-find active spec
-    cr implement specs/dark-mode/       # Specific spec
-    cr implement --parallel             # Parallel with default 3 agents
-    cr implement specs/feature/ --parallel 5   # Up to 5 parallel agents
-    MAX_ITERATIONS=100 cr implement     # Override max iterations
+    cr implement                              # Auto-find active spec
+    cr implement specs/dark-mode/             # Specific spec
+    cr implement --parallel                   # Parallel with default 3 agents
+    cr implement specs/feature/ --parallel 5  # Up to 5 parallel agents
+    MAX_ITERATIONS=100 cr implement           # Override max iterations
     cr implement --model claude-sonnet-4-5-20250929  # Use Sonnet
+    cr --max-context-chars 4000 implement     # Larger context budget (global flag)
 HELP
         return 0
     fi
@@ -5816,11 +5891,11 @@ HELP
     if [[ -n "$category" ]]; then
         echo "Category: $category (last $limit)"
         echo "---"
-        get_learnings_summary "$category" "$limit"
+        get_learnings_summary "$category" "$limit" 0  # 0 = no char cap for display
     else
         echo "All categories (last $limit)"
         echo "---"
-        get_learnings_summary "" "$limit"
+        get_learnings_summary "" "$limit" 0  # 0 = no char cap for display
     fi
 
     echo ""
@@ -6619,14 +6694,16 @@ WORKFLOW:
    14. cr review                         # Verify clean
 
 GLOBAL FLAGS:
-    --non-interactive   Auto-confirm all interactive prompts (for CI/agent use)
-    --json              Output machine-readable JSON (implies NO_COLOR)
-                        Supported by: status, implement
-    --model MODEL       Claude model for all invocations (overrides CR_MODEL)
+    --non-interactive       Auto-confirm all interactive prompts (for CI/agent use)
+    --json                  Output machine-readable JSON (implies NO_COLOR)
+                            Supported by: status, implement
+    --max-context-chars N   Cap learnings context injected into prompts (default: 2000)
+    --model MODEL           Claude model for all invocations (overrides CR_MODEL)
     --fallback-model MODEL  Fallback model when primary is overloaded
 
 ENVIRONMENT VARIABLES:
-    NO_COLOR            Disable colored output (https://no-color.org/)
+    NO_COLOR                Disable colored output (https://no-color.org/)
+    CR_MAX_CONTEXT_CHARS    Max chars for learnings context in prompts (default: 2000)
     MAX_ITERATIONS      Maximum loop iterations (default: 50)
     ITERATION_DELAY     Seconds between iterations (default: 3)
     MAX_RETRIES         Retries per iteration on transient errors (default: 3)
@@ -6677,6 +6754,14 @@ main() {
         case "$arg" in
             --non-interactive) NON_INTERACTIVE=true ;;
             --json) JSON_OUTPUT=true ;;
+            --max-context-chars)
+                [[ -z "${2:-}" ]] && { log_error "--max-context-chars requires a value"; exit 1; }
+                CR_MAX_CONTEXT_CHARS="$2"
+                shift
+                ;;
+            --max-context-chars=*)
+                CR_MAX_CONTEXT_CHARS="${arg#*=}"
+                ;;
             --model)
                 [[ -z "${2:-}" ]] && { log_error "--model requires a value"; exit 1; }
                 CR_MODEL="$2"
