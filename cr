@@ -3176,7 +3176,11 @@ HELP
                 shift 2
                 ;;
             -*)
-                # Skip flags already handled globally (--json, --non-interactive)
+                # Skip flags already handled globally (--json, --non-interactive);
+                # warn on anything else to catch future flag mistakes early
+                if [[ "$1" != "--json" && "$1" != "--non-interactive" ]]; then
+                    log_warn "cmd_implement: unknown flag: $1 (ignored)"
+                fi
                 shift
                 ;;
             *)
