@@ -253,14 +253,47 @@ Now that the environment works, understand the current state:
 
 **ONE TASK PER ITERATION. Focus beats breadth.**
 
-1. If a task is "In Progress" → Continue that task
-2. Otherwise → Pick the first "Pending" task
-3. **Move task to "In Progress" section BEFORE starting work**
+1. Check for a `<!-- CONTINUATION: ... -->` marker — if present, resume that work
+2. If a task is "In Progress" → Continue that task
+3. Otherwise → Pick the first "Pending" task
+4. **Move task to "In Progress" section BEFORE starting work**
 
 **Task Priority:**
 - Setup/infrastructure tasks FIRST
 - Core functionality SECOND
 - Polish/optimization LAST
+
+### Sub-Task Breakdown
+
+If a task is large (e.g., "build the authentication system"), break it into sub-tasks:
+
+```markdown
+- [ ] Build authentication system
+  - [ ] Create user model and migration
+  - [ ] Add login endpoint
+  - [ ] Add JWT token generation
+  - [ ] Add auth middleware
+```
+
+**Rules:**
+- Sub-tasks are indented checkboxes (2+ spaces) under a parent task
+- A parent task is only complete when ALL its sub-tasks are checked
+- You can add sub-tasks dynamically during an iteration
+- Sub-tasks count toward progress (e.g., "2/4 sub-tasks complete")
+
+### Continuation Markers
+
+If you can't finish a task in one iteration, write a CONTINUATION marker in SPEC.md:
+
+```markdown
+<!-- CONTINUATION: Implemented user model and login endpoint. Still need: JWT generation, auth middleware. Current file: src/auth/login.ts line 45 -->
+```
+
+**Rules:**
+- Place the marker at the end of the Notes section in SPEC.md
+- Be specific: mention files, line numbers, what's done, what's left
+- The next iteration will see this and pick up where you left off
+- Remove the marker when the work is complete
 
 ---
 
@@ -491,7 +524,26 @@ Move task to "Completed" with details:
   - Verified: API responds, UI renders (screenshot captured)
 ```
 
-### 8.2 Update Notes Section
+For tasks with sub-tasks, check off each sub-task individually:
+
+```markdown
+- [x] Task N: Build auth system - Iteration X
+  - [x] Create user model and migration
+  - [x] Add login endpoint
+  - [x] Add JWT token generation
+  - [x] Add auth middleware
+```
+
+### 8.2 Update Continuation State
+
+If the task is NOT complete at end of iteration:
+- Write or update a `<!-- CONTINUATION: ... -->` marker in SPEC.md Notes
+- Be specific about what's done and what remains
+
+If the task IS complete:
+- Remove any existing `<!-- CONTINUATION: ... -->` marker
+
+### 8.3 Update Notes Section
 
 Add learnings to SPEC.md Notes section:
 - What worked
@@ -514,12 +566,12 @@ jq '.learnings += [{
 }]' .cr/learnings.json > .cr/learnings.json.tmp && mv .cr/learnings.json.tmp .cr/learnings.json
 ```
 
-### 8.3 Update Frontmatter
+### 8.4 Update Frontmatter
 
 - Increment `iteration_count`
 - Update `status` if needed
 
-### 8.4 Add to Iteration Log
+### 8.5 Add to Iteration Log
 
 ```markdown
 ### Iteration X (YYYY-MM-DD HH:MM)
@@ -706,6 +758,7 @@ LEARNING: <key insight you learned>
 PATTERN: <reusable pattern discovered>
 FIXED: <error message> → <how you fixed it>
 BLOCKER: <what's blocking> | NEEDS: <what's needed to unblock>
+SUBTASKS-ADDED: <parent task> → <number of sub-tasks added>
 ```
 
 **Examples:**
