@@ -67,6 +67,11 @@ CR_MAX_CONTEXT_CHARS="${CR_MAX_CONTEXT_CHARS:-2000}"  # Max chars for learnings 
 CR_MODEL="${CR_MODEL:-}"
 CR_FALLBACK_MODEL="${CR_FALLBACK_MODEL:-}"
 
+# Budget controls
+CR_MAX_ITER_BUDGET="${CR_MAX_ITER_BUDGET:-}"  # per-iteration cap passed to --max-budget-usd
+CR_MAX_BUDGET="${CR_MAX_BUDGET:-}"             # total run cap; tracked in .cr/budget_spent.txt
+CR_LAST_ITER_COST_USD=""                       # actual cost of last iteration (parsed from JSON output)
+
 # Agent/machine invocation flags
 NON_INTERACTIVE=false
 JSON_OUTPUT=false
@@ -196,6 +201,14 @@ validate_prompt() {
         echo "$leftover" | while read -r token; do
             log_warn "  $token"
         done
+    fi
+}
+
+# Build --max-budget-usd arg string from CR_MAX_ITER_BUDGET.
+# Used by all claude --print invocations to enforce per-call budget.
+get_budget_args() {
+    if [[ -n "$CR_MAX_ITER_BUDGET" ]]; then
+        echo "--max-budget-usd $CR_MAX_ITER_BUDGET"
     fi
 }
 
@@ -334,11 +347,20 @@ run_claude_with_retry() {
         # Disable set -e temporarily to capture exit code
         set +e
 
+        # Build budget args for per-iteration budget control
+        local budget_args
+        budget_args=$(get_budget_args)
+
+        # When total budget tracking is active, request JSON output so we can extract
+        # the actual cost spent (total_cost_usd) instead of estimating from the cap.
+        local format_args=""
+        [[ -n "$CR_MAX_BUDGET" ]] && format_args="--output-format json"
+
         # Start Claude in background
-        # shellcheck disable=SC2046 # Intentional word splitting on model_args
+        # shellcheck disable=SC2086
         local model_args
         model_args=$(build_model_args)
-        echo "$prompt" | claude --dangerously-skip-permissions --print $model_args > "$temp_output" 2>&1 &
+        echo "$prompt" | claude --dangerously-skip-permissions --print $budget_args $format_args $model_args > "$temp_output" 2>&1 &
         local claude_pid=$!
         CHILD_PIDS+=("$claude_pid")
 
@@ -374,9 +396,20 @@ run_claude_with_retry() {
         set -e
 
         # Read output from temp file
-        local output=""
+        local raw_output=""
         if [[ -f "$temp_output" ]]; then
-            output=$(cat "$temp_output")
+            raw_output=$(cat "$temp_output")
+        fi
+
+        # When JSON format is active, extract .result for display and .total_cost_usd for tracking
+        local output="$raw_output"
+        if [[ -n "$format_args" ]] && [[ -n "$raw_output" ]]; then
+            local json_result json_cost
+            { read -r json_result; read -r json_cost; } < <(jq -r '(.result // ""), (.total_cost_usd // "")' <<< "$raw_output" 2>/dev/null || printf '\n\n')
+            # Use extracted text for display; keep raw_output for error pattern matching fallback
+            [[ -n "$json_result" ]] && output="$json_result"
+            # Store actual cost globally for budget tracking (cleared on each retry)
+            CR_LAST_ITER_COST_USD="${json_cost:-}"
         fi
 
         # Write output to log and terminal
@@ -396,8 +429,10 @@ run_claude_with_retry() {
             is_transient=true
             log_warn "Claude exited with code $exit_code"
         elif [[ $output_length -lt 100 ]]; then
-            # Short output - check if it's an error message
-            if echo "$output" | grep -qiE "No messages returned|ECONNRESET|ETIMEDOUT|rate.limit exceeded|503 Service|502 Bad Gateway|overloaded|ENOTFOUND|socket hang up"; then
+            # Short output - check if it's an error message (check both parsed result and raw output)
+            local check_output="$output"
+            [[ -z "$check_output" ]] && check_output="$raw_output"
+            if echo "$check_output" | grep -qiE "No messages returned|ECONNRESET|ETIMEDOUT|rate.limit exceeded|503 Service|502 Bad Gateway|overloaded|ENOTFOUND|socket hang up"; then
                 is_transient=true
                 log_warn "Transient API error detected in output"
             elif [[ -z "$output" ]]; then
@@ -3021,8 +3056,8 @@ HELP
     validate_prompt "$conversion_prompt" "spec-conversion"
 
     # Run Claude to do the conversion
-    # shellcheck disable=SC2046 # Intentional word splitting on model args
-    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print $(build_model_args)
+    # shellcheck disable=SC2086
+    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print $(get_budget_args) $(build_model_args)
 
     # Verify SPEC.md was created
     if [[ ! -f "$spec_dir/SPEC.md" ]]; then
@@ -3922,7 +3957,7 @@ run_parallel_implement() {
 cmd_implement() {
     if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "help" ]]; then
         cat << 'HELP'
-Usage: cr implement [spec-dir] [--json] [--non-interactive] [--parallel [max-agents]] [--model MODEL] [--fallback-model MODEL]
+Usage: cr implement [spec-dir] [options]
 
 Start the autonomous implementation loop. Reads SPEC.md, executes one
 task per iteration with quality gate backpressure.
@@ -3931,6 +3966,8 @@ Options:
     spec-dir                Path to spec directory (auto-detected if omitted)
     --json                  Output JSON summary on completion/failure
     --non-interactive       Auto-confirm prompts (for CI/agent use)
+    --max-budget <USD>      Total budget cap for the entire run (overrides CR_MAX_BUDGET)
+    --max-iter-budget <USD> Per-iteration budget cap (overrides CR_MAX_ITER_BUDGET)
     --parallel [N]          Run independent tasks in parallel using N agents (default: 3)
     --model MODEL           Claude model to use (e.g. claude-sonnet-4-5-20250929)
     --fallback-model MODEL  Fallback model when primary is overloaded
@@ -3946,11 +3983,12 @@ Environment:
     RETRY_DELAY=5                  Initial retry delay in seconds, doubles each retry
     ITERATION_TIMEOUT=600          Max seconds per iteration before timeout
     MAX_CONSECUTIVE_FAILURES=3     Stop after N consecutive failures
+    CR_MAX_BUDGET                  Total budget for the run in USD
+    CR_MAX_ITER_BUDGET             Per-iteration budget in USD (passed to --max-budget-usd)
     CR_MAX_CONTEXT_CHARS=2000      Max chars for learnings context in prompts
     CR_MAX_PARALLEL=3              Default max parallel agents
     CR_MODEL                       Claude model (overridden by --model flag)
     CR_FALLBACK_MODEL              Fallback model (overridden by --fallback-model flag)
-    CR_MAX_BUDGET                  Total budget in USD (forward-compatible with PR #30)
 
 Examples:
     cr implement                              # Auto-find active spec
@@ -3958,20 +3996,29 @@ Examples:
     cr implement --parallel                   # Parallel with default 3 agents
     cr implement specs/feature/ --parallel 5  # Up to 5 parallel agents
     MAX_ITERATIONS=100 cr implement           # Override max iterations
+    cr implement --max-budget 10 --max-iter-budget 2  # Budget limits
     cr implement --model claude-sonnet-4-5-20250929  # Use Sonnet
     cr --max-context-chars 4000 implement     # Larger context budget (global flag)
 HELP
         return 0
     fi
 
-    # Parse arguments — extract --parallel before positional args
+    # Parse implement-specific flags
     local spec_dir=""
     local parallel_mode=false
     local parallel_max=""
-    local args=()
-
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --max-budget)
+                CR_MAX_BUDGET="${2:-}"
+                [[ -z "$CR_MAX_BUDGET" ]] && { log_error "--max-budget requires a USD value"; exit 1; }
+                shift 2
+                ;;
+            --max-iter-budget)
+                CR_MAX_ITER_BUDGET="${2:-}"
+                [[ -z "$CR_MAX_ITER_BUDGET" ]] && { log_error "--max-iter-budget requires a USD value"; exit 1; }
+                shift 2
+                ;;
             --parallel)
                 parallel_mode=true
                 # Check if next arg is a number (optional max-agents)
@@ -3982,17 +4029,15 @@ HELP
                 shift
                 ;;
             -*)
-                # Pass through other flags
-                args+=("$1")
+                # Skip flags already handled globally (--json, --non-interactive);
+                # warn on anything else to catch future flag mistakes early
+                if [[ "$1" != "--json" && "$1" != "--non-interactive" ]]; then
+                    log_warn "cmd_implement: unknown flag: $1 (ignored)"
+                fi
                 shift
                 ;;
             *)
-                # First positional arg is spec_dir
-                if [[ -z "$spec_dir" ]]; then
-                    spec_dir="$1"
-                else
-                    args+=("$1")
-                fi
+                spec_dir="$1"
                 shift
                 ;;
         esac
@@ -4023,12 +4068,6 @@ HELP
 
         run_parallel_implement "$spec_dir" "$max_agents"
         return $?
-    fi
-
-    # Original sequential implementation follows
-    # spec_dir may already be set from argument parsing above
-    if [[ -z "$spec_dir" ]] && [[ ${#args[@]} -gt 0 ]]; then
-        spec_dir="${args[0]:-}"
     fi
 
     # If no spec dir provided, find one with status: building or pending
@@ -4115,9 +4154,27 @@ HELP
     echo "Max iterations: $MAX_ITERATIONS"
     echo "Delay:          ${ITERATION_DELAY}s between iterations"
     echo "Learnings:      .cr/learnings.json"
+    [[ -n "$CR_MAX_ITER_BUDGET" ]] && echo "Per-iter budget: \$${CR_MAX_ITER_BUDGET}"
+    [[ -n "$CR_MAX_BUDGET" ]] && echo "Total budget:    \$${CR_MAX_BUDGET}"
     echo ""
     echo "Press Ctrl+C to stop at any time."
     echo ""
+
+    # Initialize budget tracking file.
+    # Actual cost per iteration is read from claude's JSON output (--output-format json)
+    # via CR_LAST_ITER_COST_USD. CR_MAX_ITER_BUDGET is used as a fallback if the parse
+    # fails. Spend accumulates across runs on the same spec — delete .cr/budget_spent.txt
+    # to reset the counter for a fresh run.
+    if [[ -n "$CR_MAX_BUDGET" ]]; then
+        if [[ -z "$CR_MAX_ITER_BUDGET" ]]; then
+            log_warn "CR_MAX_BUDGET is set but CR_MAX_ITER_BUDGET is not. Budget tracking requires both."
+            log_warn "Set CR_MAX_ITER_BUDGET to enable the total budget guard rail."
+        fi
+        mkdir -p .cr
+        if [[ ! -f .cr/budget_spent.txt ]]; then
+            echo "0" > .cr/budget_spent.txt
+        fi
+    fi
 
     local iteration=0
     local history_dir="$spec_dir/.history"
@@ -4139,6 +4196,27 @@ HELP
         if [[ "$SHUTDOWN_REQUESTED" == "true" ]]; then
             log_info "Shutdown requested. Stopping loop."
             exit 130
+        fi
+
+        # Check total budget before starting iteration
+        if [[ -n "$CR_MAX_BUDGET" ]]; then
+            local spent
+            spent=$(cat .cr/budget_spent.txt 2>/dev/null || echo 0)
+            # Sanitize: default to 0 if file was empty or corrupted
+            spent="${spent// /}"
+            if ! [[ "$spent" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+                log_warn "Budget tracking file corrupted (value: '${spent}'). Resetting to 0. Check .cr/budget_spent.txt"
+                spent=0
+            fi
+            # Use awk for float comparison (bash doesn't support float arithmetic)
+            if awk "BEGIN {exit !($spent >= $CR_MAX_BUDGET)}"; then
+                echo ""
+                log_error "Total budget exhausted: \$${spent} spent >= \$${CR_MAX_BUDGET} limit"
+                log_info "Completed $((iteration - 1)) iterations before hitting budget."
+                log_info "To continue: increase CR_MAX_BUDGET or reset .cr/budget_spent.txt"
+                emit_json_result "budget_exceeded" "$((iteration - 1))" "$spec_file" 1
+                exit 1
+            fi
         fi
 
         # Check if all tasks are already complete before starting iteration
@@ -4323,6 +4401,29 @@ Start by reading both files now."
 
         # Success - reset consecutive failures
         CONSECUTIVE_FAILURES=0
+
+        # Track budget spent using actual cost from JSON output (CR_LAST_ITER_COST_USD).
+        # Falls back to CR_MAX_ITER_BUDGET cap if actual cost wasn't captured.
+        if [[ -n "$CR_MAX_BUDGET" ]] && [[ -n "$CR_MAX_ITER_BUDGET" ]]; then
+            local prev_spent
+            prev_spent=$(cat .cr/budget_spent.txt 2>/dev/null || echo 0)
+            prev_spent="${prev_spent// /}"
+            if ! [[ "$prev_spent" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+                log_warn "Budget tracking file corrupted (value: '${prev_spent}'). Resetting to 0. Check .cr/budget_spent.txt"
+                prev_spent=0
+            fi
+            # Use actual cost if available; fall back to per-iteration cap
+            local iter_cost="${CR_LAST_ITER_COST_USD:-$CR_MAX_ITER_BUDGET}"
+            if ! [[ "$iter_cost" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+                iter_cost="$CR_MAX_ITER_BUDGET"
+            fi
+            awk "BEGIN {printf \"%.4f\", $prev_spent + $iter_cost}" > .cr/budget_spent.txt
+            if [[ -n "$CR_LAST_ITER_COST_USD" ]]; then
+                log_info "Iteration cost: \$${CR_LAST_ITER_COST_USD} (actual)"
+            else
+                log_info "Iteration cost: \$${iter_cost} (estimated)"
+            fi
+        fi
 
         # Run per-iteration checks (tests, lint, typecheck)
         log_info "Running per-iteration checks..."
@@ -4798,11 +4899,11 @@ Run the review now."
             team_review_prompt="${team_review_prompt//__TEAM_MODEL_ARG__/$team_model_arg}"
             validate_prompt "$team_review_prompt" "review-team"
 
-            # shellcheck disable=SC2046 # Intentional word splitting on model args
-            echo "$team_review_prompt" | claude --dangerously-skip-permissions --print $(build_model_args)
+            # shellcheck disable=SC2086
+            echo "$team_review_prompt" | claude --dangerously-skip-permissions --print $(get_budget_args) $(build_model_args)
         else
-            # shellcheck disable=SC2046 # Intentional word splitting on model args
-            echo "$code_review_prompt" | claude --dangerously-skip-permissions --print $(build_model_args)
+            # shellcheck disable=SC2086
+            echo "$code_review_prompt" | claude --dangerously-skip-permissions --print $(get_budget_args) $(build_model_args)
         fi
         echo ""
     fi
@@ -4860,8 +4961,8 @@ SPEC FILE: $abs_spec_dir/SPEC.md"
             design_review_prompt="${design_review_prompt//__DESIGN_SPEC_TAG__/$design_spec_tag}"
             validate_prompt "$design_review_prompt" "review-design"
 
-            # shellcheck disable=SC2046 # Intentional word splitting on model args
-            echo "$design_review_prompt" | claude --dangerously-skip-permissions --print $(build_model_args)
+            # shellcheck disable=SC2086
+            echo "$design_review_prompt" | claude --dangerously-skip-permissions --print $(get_budget_args) $(build_model_args)
             echo ""
         fi
     fi
@@ -5095,8 +5196,8 @@ HELP
     validate_prompt "$conversion_prompt" "fix-conversion"
 
     # Run Claude to do the conversion
-    # shellcheck disable=SC2046 # Intentional word splitting on model args
-    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print $(build_model_args)
+    # shellcheck disable=SC2086
+    echo "$conversion_prompt" | claude --dangerously-skip-permissions --print $(get_budget_args) $(build_model_args)
 
     # Verify SPEC.md was created
     if [[ ! -f "$fix_dir/SPEC.md" ]]; then
@@ -6215,8 +6316,8 @@ HELP
     trap "rm -f '$temp_output'" RETURN
 
     # Call Claude to generate tests
-    # shellcheck disable=SC2046 # Intentional word splitting on model args
-    echo "$prompt" | claude --dangerously-skip-permissions --print $(build_model_args) > "$temp_output" 2>&1
+    # shellcheck disable=SC2086
+    echo "$prompt" | claude --dangerously-skip-permissions --print $(get_budget_args) $(build_model_args) > "$temp_output" 2>&1
     local exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
@@ -6710,10 +6811,11 @@ ENVIRONMENT VARIABLES:
     RETRY_DELAY         Initial retry delay in seconds, doubles each retry (default: 5)
     ITERATION_TIMEOUT   Max seconds per iteration before timeout (default: 600)
     MAX_CONSECUTIVE_FAILURES  Stop after N consecutive failures (default: 3)
+    CR_MAX_BUDGET        Total budget in USD for the entire run
+    CR_MAX_ITER_BUDGET   Per-iteration budget in USD (passed to --max-budget-usd)
     CR_MAX_PARALLEL     Max parallel agents for --parallel mode (default: 3)
     CR_MODEL            Claude model to use (e.g. claude-sonnet-4-5-20250929)
     CR_FALLBACK_MODEL   Fallback model when primary is overloaded
-    CR_MAX_BUDGET       Total budget in USD, split among parallel agents (PR #30)
 
 RESILIENCE:
     - Per-iteration timeout prevents stuck iterations
